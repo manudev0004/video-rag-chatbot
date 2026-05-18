@@ -1,0 +1,52 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+# Node
+node_modules/
+.next/
+out/
+.vercel/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Local data stores
+chroma_db/
+*.db
+*.sqlite
+
+# OS
+.DS_Store
+Thumbs.db
+workspace/
+tmp/
+local/
+*.local.*
+*.bak
+*.swp
+
+# Editor
+.vscode/settings.json
+.idea/
+*.suo
+*.user
+
+# Logs
+*.log
+logs/
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# Build artifacts
+*.pyc
+*.pyo

@@ -16,10 +16,8 @@ logger = logging.getLogger(__name__)
 class VideoAnalysisState(TypedDict):
     question: str
     chat_history: list[Any]
-    video_a_id: str
-    video_b_id: str
-    context_a: str
-    context_b: str
+    video_ids: list[str]
+    contexts: list[str]
     sources: list[dict]
     answer: str
 
@@ -70,16 +68,14 @@ def retrieve_context(video_id: str, query: str, k: int = 4) -> tuple[str, list[d
     return context, sources
 
 
-def retrieve_video_a(state: VideoAnalysisState) -> dict:
-    """LangGraph node: fetch context for video A."""
-    context, sources = retrieve_context(state["video_a_id"], state["question"])
-    return {"context_a": context, "sources": sources}
-
-
-def retrieve_video_b(state: VideoAnalysisState) -> dict:
-    """LangGraph node: fetch context for video B and merge sources."""
-    context, sources = retrieve_context(state["video_b_id"], state["question"])
-    return {"context_b": context, "sources": state["sources"] + sources}
+def retrieve_contexts(state: VideoAnalysisState) -> dict:
+    """LangGraph node: fetch context for all videos."""
+    contexts, sources = [], []
+    for video_id in state["video_ids"]:
+        context, srcs = retrieve_context(video_id, state["question"])
+        contexts.append(context)
+        sources.extend(srcs)
+    return {"contexts": contexts, "sources": sources}
 
 
 def get_llm() -> ChatGroq:
@@ -95,12 +91,14 @@ def generate_answer(state: VideoAnalysisState) -> dict:
     """LangGraph node: compare both videos and produce the final answer."""
     llm = get_llm()
 
+    context_blocks = "\n\n".join(
+        f"--- Video {i + 1} ---\n{ctx}" for i, ctx in enumerate(state["contexts"])
+    )
     system_content = (
-        "You are a social media analyst comparing two YouTube videos.\n"
+        "You are a social media analyst comparing YouTube videos.\n"
         "Use only the context provided below to answer the question.\n"
         "Be specific and cite evidence from the transcripts.\n\n"
-        f"--- Video A ---\n{state['context_a']}\n\n"
-        f"--- Video B ---\n{state['context_b']}"
+        + context_blocks
     )
 
     messages = [SystemMessage(content=system_content)]
@@ -114,12 +112,10 @@ def generate_answer(state: VideoAnalysisState) -> dict:
 
 def _build_graph():
     graph = StateGraph(VideoAnalysisState)
-    graph.add_node("retrieve_video_a", retrieve_video_a)
-    graph.add_node("retrieve_video_b", retrieve_video_b)
+    graph.add_node("retrieve_contexts", retrieve_contexts)
     graph.add_node("generate_answer", generate_answer)
-    graph.set_entry_point("retrieve_video_a")
-    graph.add_edge("retrieve_video_a", "retrieve_video_b")
-    graph.add_edge("retrieve_video_b", "generate_answer")
+    graph.set_entry_point("retrieve_contexts")
+    graph.add_edge("retrieve_contexts", "generate_answer")
     graph.add_edge("generate_answer", END)
     return graph.compile()
 

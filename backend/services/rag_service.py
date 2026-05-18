@@ -7,7 +7,7 @@ from langgraph.graph import StateGraph, END
 from langchain_groq import ChatGroq
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from .ingestion_service import get_collection, get_embeddings_model
+from .ingestion_service import search_chunks
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -27,44 +27,31 @@ def retrieve_context(video_id: str, query: str, k: int = 4) -> tuple[str, list[d
 
     Returns the formatted context string and a list of source metadata dicts.
     """
-    embeddings_model = get_embeddings_model()
-    query_embedding = embeddings_model.embed_query(query)
+    matched_chunks = search_chunks(query, video_id=video_id, k=k)
 
-    collection = get_collection()
-    results = collection.query(
-        query_embeddings=[query_embedding],
-        n_results=k,
-        where={"video_id": video_id},
-        include=["documents", "metadatas", "distances"],
-    )
-
-    docs = results["documents"][0]
-    metas = results["metadatas"][0]
-    distances = results["distances"][0]
-
-    if not docs:
+    if not matched_chunks:
         logger.warning("No chunks found for video_id=%s", video_id)
         return "", []
 
     # Prepend video-level metadata so the LLM sees title and engagement rate
-    first = metas[0]
+    video_meta = matched_chunks[0]["metadata"]
     header = (
-        f"Video: {first['title']} by {first['creator']}\n"
-        f"Engagement Rate: {first['engagement_rate']}\n\n"
+        f"Video: {video_meta['title']} by {video_meta['creator']}\n"
+        f"Engagement Rate: {video_meta['engagement_rate']}\n\n"
     )
-    context = header + "\n\n".join(docs)
+    context = header + "\n\n".join(chunk["text"] for chunk in matched_chunks)
 
     sources = [
         {
-            "video_id": m["video_id"],
-            "title": m["title"],
-            "chunk_index": m["chunk_index"],
-            "distance": round(d, 4),
+            "video_id": chunk["metadata"]["video_id"],
+            "title": chunk["metadata"]["title"],
+            "chunk_index": chunk["metadata"]["chunk_index"],
+            "distance": round(chunk["distance"], 4),
         }
-        for m, d in zip(metas, distances)
+        for chunk in matched_chunks
     ]
 
-    logger.info("Retrieved %d chunks for video_id=%s", len(docs), video_id)
+    logger.info("Retrieved %d chunks for video_id=%s", len(matched_chunks), video_id)
     return context, sources
 
 

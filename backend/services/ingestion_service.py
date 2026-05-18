@@ -10,6 +10,17 @@ from langchain_google_genai import GoogleGenerativeAIEmbeddings
 load_dotenv()
 logger = logging.getLogger(__name__)
 
+_chroma_client = None
+
+
+def _get_chroma_client():
+    global _chroma_client
+    if _chroma_client is None:
+        _chroma_client = chromadb.PersistentClient(
+            path=os.getenv("CHROMA_PATH", "./backend/chroma_db")
+        )
+    return _chroma_client
+
 
 def get_embeddings_model() -> GoogleGenerativeAIEmbeddings:
     """Return a configured Gemini embeddings model."""
@@ -21,9 +32,7 @@ def get_embeddings_model() -> GoogleGenerativeAIEmbeddings:
 
 def get_collection() -> chromadb.Collection:
     """Return the persistent ChromaDB collection for video chunks."""
-    chroma_path = os.getenv("CHROMA_PATH", "./backend/chroma_db")
-    client = chromadb.PersistentClient(path=chroma_path)
-    return client.get_or_create_collection("video_chunks")
+    return _get_chroma_client().get_or_create_collection("video_chunks")
 
 
 def chunk_transcript(text: str, metadata: dict) -> list[dict]:
@@ -99,11 +108,11 @@ def search_chunks(query: str, video_id: str | None = None, k: int = 4) -> list[d
         include=["documents", "metadatas", "distances"],
     )
 
-    hits = []
-    for doc, meta, dist in zip(
+    matched_chunks = []
+    for text, metadata, distance in zip(
         results["documents"][0],
         results["metadatas"][0],
         results["distances"][0],
     ):
-        hits.append({"text": doc, "metadata": meta, "distance": dist})
-    return hits
+        matched_chunks.append({"text": text, "metadata": metadata, "distance": distance})
+    return matched_chunks

@@ -1,0 +1,10 @@
+chromadb
+google-api-python-client
+isodate
+langchain-core
+langchain-google-genai
+langchain-groq
+langchain-text-splitters
+langgraph
+python-dotenv
+youtube-transcript-api

@@ -23,6 +23,7 @@ out/
 chroma_db/
 *.db
 *.sqlite
+video_cache/
 
 # OS
 .DS_Store

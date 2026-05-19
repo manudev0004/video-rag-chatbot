@@ -31,7 +31,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# In-memory stores — use Redis in production
+# stored in memory for now will swap for Redis in production
 video_metadata_store: dict[str, dict] = {}
 chat_histories: dict[str, list] = {}
 

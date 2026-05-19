@@ -51,6 +51,13 @@ then interactive docs are at `http://localhost:8000/docs`.
 
 ## Architecture
 
+The flow is pretty straightforward. You give it two YouTube URLs and it handles everything from there.
+
+Ingestion pulls the transcript using `youtube_transcript_api`, then grabs the stats (views, likes, comments, duration, engagement rate) from the YouTube Data API. The transcript gets split into overlapping chunks, each one embedded with Gemini and stored in ChromaDB under that video's ID.
+
+When a question comes in, LangGraph runs two nodes in sequence. The first one queries ChromaDB separately for each video and pulls the top matching chunks. The second one builds a labeled context block per video and sends all of it to Groq's Llama model to generate the comparison. For `/chat/stream`, tokens come back over SSE as they are generated so the UI feels responsive.
+
+Chat history is stored per session in memory on the server. It keeps the last 10 messages so the model has enough context without the prompt getting too long.
 
 ## Stack
 - Frontend: Next.js 14 (App Router, TypeScript)

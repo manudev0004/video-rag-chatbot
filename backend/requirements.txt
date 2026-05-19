@@ -1,4 +1,5 @@
 chromadb
+fastapi
 google-api-python-client
 isodate
 langchain-core
@@ -6,5 +7,8 @@ langchain-google-genai
 langchain-groq
 langchain-text-splitters
 langgraph
+prometheus-client
 python-dotenv
+sse-starlette
+uvicorn
 youtube-transcript-api

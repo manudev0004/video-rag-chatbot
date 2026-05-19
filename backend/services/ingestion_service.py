@@ -96,11 +96,8 @@ def store_chunks(chunks: list[dict]) -> int:
     return stored
 
 
-def search_chunks(query: str, video_id: str | None = None, k: int = 4) -> list[dict]:
-    """Embed a query and return the top-k matching chunks from ChromaDB."""
-    embeddings_model = get_embeddings_model()
-    query_embedding = embeddings_model.embed_query(query)
-
+def search_chunks(query_embedding: list[float], video_id: str | None = None, k: int = 4) -> list[dict]:
+    """Return the top-k chunks matching a pre-computed query embedding."""
     collection = get_collection()
     where = {"video_id": video_id} if video_id else None
 
@@ -119,3 +116,8 @@ def search_chunks(query: str, video_id: str | None = None, k: int = 4) -> list[d
     ):
         matched_chunks.append({"text": text, "metadata": metadata, "distance": distance})
     return matched_chunks
+
+
+def embed_query(query: str) -> list[float]:
+    """Embed a query string using the configured Gemini model."""
+    return get_embeddings_model().embed_query(query)

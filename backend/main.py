@@ -17,6 +17,7 @@ from .monitoring import probe_host, recent_metrics, system_info
 from .services import cache_service
 from .services.ingestion_service import chunk_transcript, get_collection, store_chunks
 from .services.metadata_service import get_video_metadata
+from .services.ingestion_service import embed_query
 from .services.rag_service import app as rag_app, retrieve_context
 from .services.transcript_service import extract_video_id, get_transcript
 
@@ -86,10 +87,10 @@ def ingest(request: IngestRequest, bg: BackgroundTasks) -> IngestResponse:
         else:
             try:
                 with ThreadPoolExecutor(max_workers=2) as pool:
-                    tf = pool.submit(get_transcript, url)
-                    mf = pool.submit(get_video_metadata, url)
-                    transcript = tf.result()
-                    metadata = mf.result()
+                    transcript_fut = pool.submit(get_transcript, url)
+                    metadata_fut = pool.submit(get_video_metadata, url)
+                    transcript = transcript_fut.result()
+                    metadata = metadata_fut.result()
             except (ValueError, RuntimeError) as exc:
                 raise HTTPException(status_code=422, detail=str(exc))
             cache_service.save(video_id, metadata, transcript)
@@ -112,7 +113,8 @@ def ingest_status(video_ids: str) -> dict:
 @app.post("/chat", response_model=ChatResponse)
 def chat(request: ChatRequest) -> ChatResponse:
     """Run a RAG question over the loaded videos and return the full answer."""
-    if not video_metadata_store:
+    active_ids = request.video_ids or list(video_metadata_store.keys())
+    if not active_ids:
         raise HTTPException(status_code=400, detail="No videos loaded. Call /ingest first.")
 
     chat_counter.inc()
@@ -122,7 +124,7 @@ def chat(request: ChatRequest) -> ChatResponse:
         result = rag_app.invoke({
             "question": request.question,
             "chat_history": history,
-            "video_ids": list(video_metadata_store.keys()),
+            "video_ids": active_ids,
             "contexts": [],
             "sources": [],
             "answer": "",
@@ -140,20 +142,20 @@ def chat(request: ChatRequest) -> ChatResponse:
 @app.post("/chat/stream")
 async def chat_stream(request: ChatRequest) -> EventSourceResponse:
     """Stream the LLM answer token by token over SSE, then emit sources and done events."""
-    if not video_metadata_store:
-        raise HTTPException(status_code=400, detail="No videos loaded. Call /ingest first.")
-
     video_ids = request.video_ids if request.video_ids else list(video_metadata_store.keys())
+    if not video_ids:
+        raise HTTPException(status_code=400, detail="No videos loaded. Call /ingest first.")
     history = chat_histories.get(request.session_id, [])
 
+    query_embedding = embed_query(request.question)
     all_contexts: list[str] = []
     raw_sources: list[dict] = []
     for video_id in video_ids:
-        context, sources = retrieve_context(video_id, request.question)
+        context, sources = retrieve_context(video_id, query_embedding)
         all_contexts.append(context)
         raw_sources.extend(sources)
 
-    # one source entry per video — keep the chunk closest to the query
+    # one source entry per video, keep the chunk closest to the query
     best: dict[str, dict] = {}
     for s in raw_sources:
         vid = s["video_id"]

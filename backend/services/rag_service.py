@@ -7,7 +7,7 @@ from langgraph.graph import StateGraph, END
 from langchain_groq import ChatGroq
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from .ingestion_service import search_chunks
+from .ingestion_service import embed_query, search_chunks
 from ..monitoring import track
 
 load_dotenv()
@@ -24,12 +24,12 @@ class VideoAnalysisState(TypedDict):
 
 
 @track("retrieve_context")
-def retrieve_context(video_id: str, query: str, k: int = 4) -> tuple[str, list[dict]]:
-    """Search ChromaDB for relevant chunks from a specific video.
+def retrieve_context(video_id: str, query_embedding: list[float], k: int = 4) -> tuple[str, list[dict]]:
+    """Search ChromaDB for relevant chunks from a specific video using a pre-computed embedding.
 
     Returns the formatted context string and a list of source metadata dicts.
     """
-    matched_chunks = search_chunks(query, video_id=video_id, k=k)
+    matched_chunks = search_chunks(query_embedding, video_id=video_id, k=k)
 
     if not matched_chunks:
         logger.warning("No chunks found for video_id=%s", video_id)
@@ -59,11 +59,12 @@ def retrieve_context(video_id: str, query: str, k: int = 4) -> tuple[str, list[d
 
 def retrieve_contexts(state: VideoAnalysisState) -> dict:
     """LangGraph node: fetch context for all videos."""
+    query_embedding = embed_query(state["question"])
     contexts, sources = [], []
     for video_id in state["video_ids"]:
-        context, srcs = retrieve_context(video_id, state["question"])
+        context, video_sources = retrieve_context(video_id, query_embedding)
         contexts.append(context)
-        sources.extend(srcs)
+        sources.extend(video_sources)
 
     # one source entry per video — keep the chunk closest to the query
     best: dict[str, dict] = {}
@@ -80,7 +81,7 @@ def get_llm() -> ChatGroq:
     return ChatGroq(
         model=os.getenv("LLM_MODEL"),
         temperature=0,
-        streaming=False,
+        streaming=True,
     )
 
 

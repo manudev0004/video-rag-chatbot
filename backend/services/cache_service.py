@@ -95,11 +95,19 @@ def is_embedded(video_id: str) -> bool:
 
 
 def mark_embedded(video_id: str) -> None:
-    """Record that this video's chunks have been stored in ChromaDB."""
+    """Record that this video's chunks have been stored in ChromaDB and drop the transcript from disk."""
     with _lock:
         if video_id in _index:
             _index[video_id]["embedded"] = True
             _save_index()
+    path = _video_path(video_id)
+    if path.exists():
+        try:
+            data = json.loads(path.read_text())
+            if "transcript" in data:
+                path.write_text(json.dumps({"metadata": data["metadata"]}))
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning("Could not strip transcript for %s: %s", video_id, exc)
 
 
 def delete(video_id: str) -> None:

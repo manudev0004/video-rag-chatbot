@@ -14,6 +14,9 @@ const MAX_URLS = 10;
 const DEMO_URLS = [
   "https://www.youtube.com/watch?v=ksn5yrsC3Wg",
   "https://www.youtube.com/watch?v=12DWqKQ6KHw",
+  "https://youtu.be/B3m3AMRlYfc?si=z8YAE2kJR5p6GAMl",
+  "https://youtu.be/jAHF7L_Fh9Q?si=C8uztfFSNswfkXlk",
+  "https://youtu.be/TYhNHX372ek?si=zHy3QD8n3_VcxOPN",
 ];
 
 export default function URLInput({ urls, onChange, onSubmit, loading }: URLInputProps) {

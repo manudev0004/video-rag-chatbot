@@ -4,6 +4,7 @@ import logging
 
 from dotenv import load_dotenv
 from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
+from youtube_transcript_api._errors import CouldNotRetrieveTranscript
 
 from ..monitoring import track
 
@@ -38,6 +39,8 @@ def get_transcript(url: str) -> str:
         raise RuntimeError(f"Transcripts are disabled for video: {video_id}")
     except NoTranscriptFound:
         raise RuntimeError(f"No transcript found for video: {video_id}")
+    except CouldNotRetrieveTranscript as exc:
+        raise RuntimeError(f"YouTube blocked the transcript request for {video_id}: {exc}")
 
     transcript = " ".join(snippet.text for snippet in fetched)
     logger.info("Transcript fetched: %d characters", len(transcript))

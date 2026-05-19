@@ -4,6 +4,8 @@ import logging
 
 from dotenv import load_dotenv
 import chromadb
+
+from ..monitoring import track
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 
@@ -60,6 +62,7 @@ def chunk_transcript(text: str, metadata: dict) -> list[dict]:
     ]
 
 
+@track("store_chunks")
 def store_chunks(chunks: list[dict]) -> int:
     """Embed and store chunks in ChromaDB, replacing any existing chunks for the same video."""
     if not chunks:

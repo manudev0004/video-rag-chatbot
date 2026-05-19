@@ -8,6 +8,7 @@ from langchain_groq import ChatGroq
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from .ingestion_service import search_chunks
+from ..monitoring import track
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -22,6 +23,7 @@ class VideoAnalysisState(TypedDict):
     answer: str
 
 
+@track("retrieve_context")
 def retrieve_context(video_id: str, query: str, k: int = 4) -> tuple[str, list[dict]]:
     """Search ChromaDB for relevant chunks from a specific video.
 

@@ -12,6 +12,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_
 from sse_starlette.sse import EventSourceResponse
 
 from .models.schemas import ChatRequest, ChatResponse, IngestRequest, IngestResponse, VideoMetadata
+from .monitoring import probe_host, recent_metrics, system_info
 from .services.ingestion_service import chunk_transcript, store_chunks
 from .services.metadata_service import get_video_metadata
 from .services.rag_service import app as rag_app, retrieve_context
@@ -170,6 +171,46 @@ def delete_session(session_id: str) -> dict:
         raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found.")
     del chat_histories[session_id]
     return {"status": "ok", "session_id": session_id}
+
+
+@app.get("/benchmark")
+def benchmark() -> dict:
+    """Return hardware info, network latency probes, and per-operation metrics from this process."""
+    info = system_info()
+
+    network_targets = [
+        ("api.groq.com", 443),
+        ("generativelanguage.googleapis.com", 443),
+        ("www.youtube.com", 443),
+    ]
+    network = {host: probe_host(host, port) for host, port in network_targets}
+
+    ops = []
+    for m in recent_metrics():
+        ops.append({
+            "name": m.name,
+            "duration_ms": m.duration_ms,
+            "efficiency_score": m.efficiency_score,
+            "bottleneck_hint": m.bottleneck_hint,
+            "mem_delta_mb": m.mem_delta_mb,
+            "success": m.success,
+        })
+
+    avg_score = round(sum(o["efficiency_score"] for o in ops) / len(ops), 1) if ops else None
+
+    bottlenecks = [o["bottleneck_hint"] for o in ops if o["bottleneck_hint"] != "none"]
+    top_bottleneck = max(set(bottlenecks), key=bottlenecks.count) if bottlenecks else "none"
+
+    return {
+        "system": info,
+        "network_ms": network,
+        "operations": ops,
+        "summary": {
+            "avg_efficiency_score": avg_score,
+            "top_bottleneck": top_bottleneck,
+            "ops_recorded": len(ops),
+        },
+    }
 
 
 @app.get("/metrics")

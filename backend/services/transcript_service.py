@@ -5,6 +5,8 @@ import logging
 from dotenv import load_dotenv
 from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
 
+from ..monitoring import track
+
 load_dotenv()
 logger = logging.getLogger(__name__)
 
@@ -23,6 +25,7 @@ def extract_video_id(url: str) -> str:
     raise ValueError(f"Could not extract a YouTube video ID from: {url}")
 
 
+@track("transcript_fetch")
 def get_transcript(url: str) -> str:
     """Fetch and return the full transcript for a YouTube video as plain text."""
     video_id = extract_video_id(url)

@@ -5,7 +5,12 @@ const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 async function handleResponse<T>(res: Response): Promise<T> {
   if (!res.ok) {
     const text = await res.text().catch(() => res.statusText);
-    throw new Error(`Request failed (${res.status}): ${text}`);
+    let detail = text;
+    try {
+      const parsed = JSON.parse(text) as { detail?: string };
+      if (parsed.detail) detail = parsed.detail.split("\n")[0].trim();
+    } catch { /* not JSON, use raw text */ }
+    throw new Error(detail);
   }
   return res.json() as Promise<T>;
 }
@@ -24,9 +29,25 @@ export async function getMetadata(): Promise<Record<string, VideoMetadata>> {
   return handleResponse<Record<string, VideoMetadata>>(res);
 }
 
+export async function getIngestStatus(videoIds: string[]): Promise<Record<string, string>> {
+  const res = await fetch(`${BASE_URL}/ingest/status?video_ids=${videoIds.join(",")}`);
+  return handleResponse<Record<string, string>>(res);
+}
+
+export async function deleteVideo(videoId: string): Promise<void> {
+  const res = await fetch(`${BASE_URL}/videos/${videoId}`, { method: "DELETE" });
+  await handleResponse<unknown>(res);
+}
+
+export async function resetVideos(): Promise<void> {
+  const res = await fetch(`${BASE_URL}/videos`, { method: "DELETE" });
+  await handleResponse<unknown>(res);
+}
+
 export async function streamChat(
   question: string,
   sessionId: string,
+  videoIds: string[],
   onToken: (token: string) => void,
   onSources: (sources: Array<Record<string, unknown>>) => void,
   onDone: () => void
@@ -34,7 +55,7 @@ export async function streamChat(
   const res = await fetch(`${BASE_URL}/chat/stream`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ question, session_id: sessionId }),
+    body: JSON.stringify({ question, session_id: sessionId, video_ids: videoIds }),
   });
 
   if (!res.ok) {

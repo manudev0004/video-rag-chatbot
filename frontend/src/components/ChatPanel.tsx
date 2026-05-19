@@ -1,7 +1,24 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback, KeyboardEvent } from "react";
+import Markdown from "react-markdown";
+import type { Components } from "react-markdown";
 import type { ChatMessage } from "@/types";
+
+const mdComponents: Components = {
+  p: ({ children }) => <p className="mb-2 last:mb-0">{children}</p>,
+  ul: ({ children }) => <ul className="mb-2 ml-4 list-disc space-y-0.5">{children}</ul>,
+  ol: ({ children }) => <ol className="mb-2 ml-4 list-decimal space-y-0.5">{children}</ol>,
+  li: ({ children }) => <li>{children}</li>,
+  strong: ({ children }) => <strong className="font-semibold">{children}</strong>,
+  em: ({ children }) => <em className="italic">{children}</em>,
+  h1: ({ children }) => <h1 className="mb-1 text-base font-semibold">{children}</h1>,
+  h2: ({ children }) => <h2 className="mb-1 text-sm font-semibold">{children}</h2>,
+  h3: ({ children }) => <h3 className="mb-1 text-sm font-semibold">{children}</h3>,
+  code: ({ children }) => (
+    <code className="rounded bg-zinc-200 px-1 py-0.5 font-mono text-xs">{children}</code>
+  ),
+};
 
 interface ChatPanelProps {
   messages: ChatMessage[];
@@ -110,14 +127,20 @@ export default function ChatPanel({ messages, onSend, disabled, isLoading }: Cha
             <div key={i} className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
               <div className={`max-w-[80%] ${isUser ? "items-end" : "items-start"} flex flex-col`}>
                 <div
-                  className={`rounded-2xl px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap ${
+                  className={`rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${
                     isUser
-                      ? "rounded-tr-sm bg-blue-600 text-white"
+                      ? "rounded-tr-sm bg-blue-600 text-white whitespace-pre-wrap"
                       : "rounded-tl-sm bg-zinc-100 text-zinc-900"
                   }`}
                 >
-                  {msg.content}
-                  {isLast && isStreaming && <StreamingDots />}
+                  {isUser ? (
+                    msg.content
+                  ) : (
+                    <>
+                      <Markdown components={mdComponents}>{msg.content}</Markdown>
+                      {isLast && isStreaming && <StreamingDots />}
+                    </>
+                  )}
                 </div>
 
                 {!isUser && msg.sources && msg.sources.length > 0 && (
@@ -127,6 +150,22 @@ export default function ChatPanel({ messages, onSend, disabled, isLoading }: Cha
             </div>
           );
         })}
+
+        {!isStreaming && lastMessage?.role === "assistant" && (
+          <div className="flex flex-wrap gap-2 pt-2">
+            {SUGGESTIONS.map((q) => (
+              <button
+                key={q}
+                type="button"
+                onClick={() => onSend(q)}
+                disabled={disabled}
+                className="rounded-lg border border-zinc-200 px-3 py-1.5 text-left text-xs text-zinc-600 hover:bg-zinc-50 disabled:opacity-40 transition-colors"
+              >
+                {q}
+              </button>
+            ))}
+          </div>
+        )}
 
         <div ref={bottomRef} />
       </div>

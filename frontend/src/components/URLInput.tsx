@@ -1,6 +1,6 @@
 "use client";
 
-import { KeyboardEvent, ClipboardEvent } from "react";
+import { useState, KeyboardEvent } from "react";
 
 interface URLInputProps {
   urls: string[];
@@ -9,87 +9,74 @@ interface URLInputProps {
   loading: boolean;
 }
 
-const INITIAL_ROWS = 2;
+const MAX_URLS = 10;
 
-function normalizeRows(urls: string[]): string[] {
-  return urls.length === 0 ? Array(INITIAL_ROWS).fill("") : urls;
-}
+const DEMO_URLS = [
+  "https://www.youtube.com/watch?v=ksn5yrsC3Wg",
+  "https://www.youtube.com/watch?v=12DWqKQ6KHw",
+];
 
 export default function URLInput({ urls, onChange, onSubmit, loading }: URLInputProps) {
-  const rows = normalizeRows(urls);
-  const hasContent = rows.some((u) => u.trim() !== "");
+  const [demoCount, setDemoCount] = useState(2);
 
-  function update(index: number, value: string) {
-    const next = [...rows];
-    next[index] = value;
-    onChange(next);
+  const text = urls.join("\n");
+  const hasContent = urls.some((u) => u.trim() !== "");
+
+  function handleChange(value: string) {
+    onChange(value.split("\n").slice(0, MAX_URLS));
   }
 
-  function addRow() {
-    onChange([...rows, ""]);
+  function loadDemos() {
+    onChange(DEMO_URLS.slice(0, demoCount));
   }
 
-  function removeRow(index: number) {
-    onChange(rows.filter((_, i) => i !== index));
-  }
-
-  function handlePaste(e: ClipboardEvent<HTMLInputElement>, index: number) {
-    const pasted = e.clipboardData.getData("text");
-    const lines = pasted.split("\n").map((l) => l.trim()).filter(Boolean);
-    if (lines.length <= 1) return;
-
-    e.preventDefault();
-    const next = [...rows];
-    next.splice(index, 1, ...lines);
-    onChange(next);
-  }
-
-  function handleKeyDown(e: KeyboardEvent<HTMLInputElement>) {
-    if (e.key === "Enter" && !e.shiftKey && hasContent && !loading) {
+  function handleKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
+    if (e.key === "Enter" && e.ctrlKey && hasContent && !loading) {
       e.preventDefault();
       onSubmit();
     }
   }
 
   return (
-    <div className="flex flex-col gap-3">
-      {rows.map((url, i) => (
-        <div key={i} className="flex items-center gap-2">
-          <input
-            type="url"
-            value={url}
-            placeholder="https://www.youtube.com/watch?v=..."
-            onChange={(e) => update(i, e.target.value)}
-            onPaste={(e) => handlePaste(e, i)}
-            onKeyDown={handleKeyDown}
+    <div className="flex flex-col gap-2">
+      <textarea
+        rows={3}
+        value={text}
+        onChange={(e) => handleChange(e.target.value)}
+        onKeyDown={handleKeyDown}
+        disabled={loading}
+        placeholder={`One YouTube URL per line, up to ${MAX_URLS}`}
+        className="w-full resize-none rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder:text-zinc-400 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+      />
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-zinc-400">Demo:</span>
+          <button
+            type="button"
+            onClick={() => setDemoCount((c) => Math.max(1, c - 1))}
+            disabled={loading || demoCount <= 1}
+            className="rounded border border-zinc-200 px-2 py-0.5 text-xs text-zinc-600 hover:bg-zinc-50 disabled:opacity-40 transition-colors"
+          >
+            -
+          </button>
+          <span className="w-4 text-center text-xs text-zinc-700">{demoCount}</span>
+          <button
+            type="button"
+            onClick={() => setDemoCount((c) => Math.min(DEMO_URLS.length, c + 1))}
+            disabled={loading || demoCount >= DEMO_URLS.length}
+            className="rounded border border-zinc-200 px-2 py-0.5 text-xs text-zinc-600 hover:bg-zinc-50 disabled:opacity-40 transition-colors"
+          >
+            +
+          </button>
+          <button
+            type="button"
+            onClick={loadDemos}
             disabled={loading}
-            className="flex-1 rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder:text-zinc-400 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
-          />
-          {rows.length > 1 && (
-            <button
-              type="button"
-              onClick={() => removeRow(i)}
-              disabled={loading}
-              aria-label="Remove URL"
-              className="rounded-md px-2 py-2 text-zinc-400 hover:text-red-500 disabled:opacity-40 transition-colors"
-            >
-              <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
-                <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
-              </svg>
-            </button>
-          )}
+            className="text-xs text-blue-600 hover:text-blue-700 disabled:opacity-40 transition-colors"
+          >
+            Load
+          </button>
         </div>
-      ))}
-
-      <div className="flex items-center justify-between gap-3 pt-1">
-        <button
-          type="button"
-          onClick={addRow}
-          disabled={loading}
-          className="text-sm text-blue-600 hover:text-blue-700 disabled:opacity-40 transition-colors"
-        >
-          + Add Video
-        </button>
 
         <button
           type="button"

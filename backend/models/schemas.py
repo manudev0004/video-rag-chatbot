@@ -6,9 +6,11 @@ class IngestRequest(BaseModel):
 
     @field_validator("urls")
     @classmethod
-    def requires_at_least_two(cls, values: list[str]) -> list[str]:
-        if len(values) < 2:
-            raise ValueError("At least 2 video URLs are required.")
+    def validate_url_count(cls, values: list[str]) -> list[str]:
+        if len(values) < 1:
+            raise ValueError("At least 1 video URL is required.")
+        if len(values) > 10:
+            raise ValueError("Maximum 10 video URLs allowed.")
         return values
 
 

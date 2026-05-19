@@ -1,9 +1,10 @@
 import json
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -13,10 +14,11 @@ from sse_starlette.sse import EventSourceResponse
 
 from .models.schemas import ChatRequest, ChatResponse, IngestRequest, IngestResponse, VideoMetadata
 from .monitoring import probe_host, recent_metrics, system_info
-from .services.ingestion_service import chunk_transcript, store_chunks
+from .services import cache_service
+from .services.ingestion_service import chunk_transcript, get_collection, store_chunks
 from .services.metadata_service import get_video_metadata
 from .services.rag_service import app as rag_app, retrieve_context
-from .services.transcript_service import get_transcript
+from .services.transcript_service import extract_video_id, get_transcript
 
 load_dotenv()
 
@@ -47,36 +49,64 @@ def health() -> dict:
     return {"status": "ok", "videos_loaded": len(video_metadata_store)}
 
 
+def _embed_video(video_id: str) -> None:
+    """Background task: chunk and embed a video that is already cached."""
+    entry = cache_service.load(video_id)
+    if not entry:
+        logger.warning("Background embed: no cache entry for video_id=%s", video_id)
+        return
+    chunks = chunk_transcript(entry["transcript"], entry["metadata"])
+    try:
+        store_chunks(chunks)
+        cache_service.mark_embedded(video_id)
+        logger.info("Background embed done for video_id=%s", video_id)
+    except Exception as exc:
+        logger.error("Background embed failed for video_id=%s: %s", video_id, exc)
+
+
 @app.post("/ingest", response_model=IngestResponse)
-def ingest(request: IngestRequest) -> IngestResponse:
-    """Fetch, embed, and store all provided videos. Overwrites existing data for the same video IDs."""
+def ingest(request: IngestRequest, bg: BackgroundTasks) -> IngestResponse:
+    """Return video metadata immediately; embedding runs in the background."""
     ingest_counter.inc()
     ingested: dict[str, VideoMetadata] = {}
 
     for url in request.urls:
         try:
-            transcript = get_transcript(url)
-            metadata = get_video_metadata(url)
-        except (ValueError, RuntimeError) as exc:
+            video_id = extract_video_id(url)
+        except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc))
 
-        chunks = chunk_transcript(transcript, {
-            "video_id": metadata["video_id"],
-            "title": metadata["title"],
-            "creator": metadata["creator"],
-            "engagement_rate": metadata["engagement_rate"],
-        })
+        if cache_service.has_metadata(video_id):
+            entry = cache_service.load(video_id)
+            if not entry:
+                raise HTTPException(status_code=500, detail=f"Cache read failed for {video_id}")
+            metadata = entry["metadata"]
+            if not cache_service.is_embedded(video_id):
+                bg.add_task(_embed_video, video_id)
+        else:
+            try:
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    tf = pool.submit(get_transcript, url)
+                    mf = pool.submit(get_video_metadata, url)
+                    transcript = tf.result()
+                    metadata = mf.result()
+            except (ValueError, RuntimeError) as exc:
+                raise HTTPException(status_code=422, detail=str(exc))
+            cache_service.save(video_id, metadata, transcript)
+            bg.add_task(_embed_video, video_id)
 
-        try:
-            store_chunks(chunks)
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"Embedding failed: {exc}")
-
-        video_metadata_store[metadata["video_id"]] = metadata
-        ingested[metadata["video_id"]] = VideoMetadata(**metadata)
-        logger.info("Ingested video_id=%s", metadata["video_id"])
+        video_metadata_store[video_id] = metadata
+        ingested[video_id] = VideoMetadata(**metadata)
+        logger.info("Ingest returned metadata for video_id=%s", video_id)
 
     return IngestResponse(status="ok", videos=ingested)
+
+
+@app.get("/ingest/status")
+def ingest_status(video_ids: str) -> dict:
+    """Return 'ready' or 'indexing' for each requested video_id."""
+    ids = [v.strip() for v in video_ids.split(",") if v.strip()]
+    return {vid: "ready" if cache_service.is_embedded(vid) else "indexing" for vid in ids}
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -113,15 +143,23 @@ async def chat_stream(request: ChatRequest) -> EventSourceResponse:
     if not video_metadata_store:
         raise HTTPException(status_code=400, detail="No videos loaded. Call /ingest first.")
 
-    video_ids = list(video_metadata_store.keys())
+    video_ids = request.video_ids if request.video_ids else list(video_metadata_store.keys())
     history = chat_histories.get(request.session_id, [])
 
     all_contexts: list[str] = []
-    all_sources: list[dict] = []
+    raw_sources: list[dict] = []
     for video_id in video_ids:
         context, sources = retrieve_context(video_id, request.question)
         all_contexts.append(context)
-        all_sources.extend(sources)
+        raw_sources.extend(sources)
+
+    # one source entry per video — keep the chunk closest to the query
+    best: dict[str, dict] = {}
+    for s in raw_sources:
+        vid = s["video_id"]
+        if vid not in best or s["distance"] < best[vid]["distance"]:
+            best[vid] = s
+    all_sources = list(best.values())
 
     context_blocks = "\n\n".join(
         f"--- Video {i + 1} ---\n{ctx}" for i, ctx in enumerate(all_contexts)
@@ -162,6 +200,33 @@ async def chat_stream(request: ChatRequest) -> EventSourceResponse:
 def get_metadata() -> dict:
     """Return metadata for all currently loaded videos."""
     return video_metadata_store
+
+
+@app.delete("/videos/{video_id}")
+def delete_video(video_id: str) -> dict:
+    """Remove a video from the current session. Deletes its ChromaDB chunks and cache entry."""
+    if video_id not in video_metadata_store:
+        raise HTTPException(status_code=404, detail=f"Video not loaded: {video_id}")
+    del video_metadata_store[video_id]
+    col = get_collection()
+    existing = col.get(where={"video_id": video_id}, include=[])
+    if existing["ids"]:
+        col.delete(ids=existing["ids"])
+    cache_service.delete(video_id)
+    return {"status": "ok", "video_id": video_id}
+
+
+@app.delete("/videos")
+def reset_videos() -> dict:
+    """Remove all loaded videos, their ChromaDB chunks, and their cache entries."""
+    video_metadata_store.clear()
+    col = get_collection()
+    all_ids = col.get(include=[])["ids"]
+    if all_ids:
+        col.delete(ids=all_ids)
+    for vid in cache_service.list_ids():
+        cache_service.delete(vid)
+    return {"status": "ok"}
 
 
 @app.delete("/session/{session_id}")

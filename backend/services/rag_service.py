@@ -64,7 +64,15 @@ def retrieve_contexts(state: VideoAnalysisState) -> dict:
         context, srcs = retrieve_context(video_id, state["question"])
         contexts.append(context)
         sources.extend(srcs)
-    return {"contexts": contexts, "sources": sources}
+
+    # one source entry per video — keep the chunk closest to the query
+    best: dict[str, dict] = {}
+    for s in sources:
+        vid = s["video_id"]
+        if vid not in best or s["distance"] < best[vid]["distance"]:
+            best[vid] = s
+
+    return {"contexts": contexts, "sources": list(best.values())}
 
 
 def get_llm() -> ChatGroq:

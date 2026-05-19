@@ -17,6 +17,7 @@ class IngestRequest(BaseModel):
 class ChatRequest(BaseModel):
     question: str
     session_id: str = "default"
+    video_ids: list[str] = []
 
 
 class VideoMetadata(BaseModel):

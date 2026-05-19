@@ -18,6 +18,7 @@ from backend.services.transcript_service import get_transcript
 from backend.services.metadata_service import get_video_metadata
 from backend.services.ingestion_service import chunk_transcript, store_chunks
 from backend.services.rag_service import app as rag_app
+from backend.monitoring import recent_metrics, system_info
 
 
 VIDEO_A_URL = "https://www.youtube.com/watch?v=SVTPv4sI_Jc"
@@ -62,5 +63,32 @@ def main() -> None:
         print(f"  [{s['video_id']}] {s['title']} - chunk {s['chunk_index']} (dist={s['distance']})")
 
 
+def print_metrics() -> None:
+    """Print a summary of all tracked operations from this run."""
+    info = system_info()
+    print(f"\nSystem: {info['cpu_cores']} cores  CPU {info['cpu_percent']}%  RAM free {info['ram_free_gb']}GB / {info['ram_total_gb']}GB")
+
+    ops = recent_metrics()
+    if not ops:
+        print("No metrics recorded.")
+        return
+
+    col = 22
+    print(f"\n{'Operation':<{col}} {'Duration':>10} {'Score':>7} {'Bottleneck':>12} {'Mem delta':>10}")
+    print("-" * (col + 44))
+    for m in ops:
+        hint = m.bottleneck_hint if m.bottleneck_hint != "none" else ""
+        status = "ok" if m.success else "FAIL"
+        print(f"{m.name:<{col}} {m.duration_ms:>9.0f}ms {m.efficiency_score:>7.1f} {hint:>12} {m.mem_delta_mb:>8.1f}MB  {status}")
+
+    scores = [m.efficiency_score for m in ops]
+    avg = sum(scores) / len(scores)
+    print(f"\nAvg efficiency score: {avg:.1f} / 100")
+    print("Score guide: 60+ good, 30-60 moderate, <30 likely network/API bound")
+
+
 if __name__ == "__main__":
+    show_metrics = "--metrics" in sys.argv
     main()
+    if show_metrics:
+        print_metrics()

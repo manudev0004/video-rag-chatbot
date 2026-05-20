@@ -44,6 +44,11 @@ export async function resetVideos(): Promise<void> {
   await handleResponse<unknown>(res);
 }
 
+export async function deleteSession(sessionId: string): Promise<void> {
+  const res = await fetch(`${BASE_URL}/session/${sessionId}`, { method: "DELETE" });
+  if (!res.ok && res.status !== 404) await handleResponse<unknown>(res);
+}
+
 export async function streamChat(
   question: string,
   sessionId: string,

@@ -1,11 +1,12 @@
 "use client";
 
 import { useState, useRef, useCallback, useEffect } from "react";
-import type { VideoMetadata, ChatMessage } from "@/types";
+import type { VideoMetadata, ChatMessage, ChatSession } from "@/types";
 import * as api from "@/services/api";
 import URLInput from "@/components/URLInput";
 import VideoCard from "@/components/VideoCard";
 import ChatPanel from "@/components/ChatPanel";
+import SessionList from "@/components/SessionList";
 
 export default function Page() {
   const [urls, setUrls] = useState<string[]>([]);
@@ -15,17 +16,59 @@ export default function Page() {
   const [isChatLoading, setIsChatLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [indexingIds, setIndexingIds] = useState<Set<string>>(new Set());
+  const [sessions, setSessions] = useState<ChatSession[]>([]);
+  const [currentSessionId, setCurrentSessionId] = useState<string>(() => crypto.randomUUID());
 
-  const sessionId = useRef<string>(crypto.randomUUID());
+  const sessionId = useRef<string>(currentSessionId);
   const videoDataRef = useRef(videoData);
 
-  // keep a ref so handleChat always reads the current video set without being in its deps
   videoDataRef.current = videoData;
 
   const hasVideos = Object.keys(videoData).length > 0;
   const isIndexing = indexingIds.size > 0;
 
-  // poll /ingest/status until all pending videos are indexed
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem("rag-sessions");
+      if (raw) setSessions(JSON.parse(raw) as ChatSession[]);
+    } catch {
+      // ignore, data is corrupted
+    }
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem("rag-sessions", JSON.stringify(sessions));
+  }, [sessions]);
+
+  useEffect(() => {
+    if (messages.length === 0) return;
+    const last = messages[messages.length - 1];
+    if (last?.isStreaming || last?.role !== "assistant") return;
+
+    const sid = currentSessionId;
+    const firstUserMsg = messages.find((m) => m.role === "user");
+    const title = (firstUserMsg?.content.slice(0, 40) ?? "Chat").trim();
+    const currentVideos = videoDataRef.current;
+
+    setSessions((prev) => {
+      const idx = prev.findIndex((s) => s.id === sid);
+      const updated: ChatSession = {
+        id: sid,
+        title,
+        messages: messages.map((m) => ({ ...m, isStreaming: false })),
+        videoIds: Object.keys(currentVideos),
+        videoData: { ...currentVideos },
+        createdAt: idx >= 0 ? prev[idx].createdAt : Date.now(),
+      };
+      if (idx >= 0) {
+        const next = [...prev];
+        next[idx] = updated;
+        return next;
+      }
+      return [updated, ...prev];
+    });
+  }, [messages, currentSessionId]);
+
   useEffect(() => {
     if (indexingIds.size === 0) return;
     const ids = [...indexingIds];
@@ -53,9 +96,7 @@ export default function Page() {
 
     try {
       const result = await api.ingestVideos(validUrls);
-      // merge new videos into existing set (additive)
       setVideoData((prev) => ({ ...prev, ...result.videos }));
-      // mark all returned videos as potentially indexing; first poll will clear ready ones
       setIndexingIds((prev) => {
         const next = new Set(prev);
         for (const id of Object.keys(result.videos)) next.add(id);
@@ -87,10 +128,63 @@ export default function Page() {
   }, []);
 
   const handleNewChat = useCallback(() => {
-    sessionId.current = crypto.randomUUID();
+    const newId = crypto.randomUUID();
+    sessionId.current = newId;
+    setCurrentSessionId(newId);
     setMessages([]);
     setVideoData({});
     setIndexingIds(new Set());
+    setUrls([]);
+    setError(null);
+  }, []);
+
+  const handleResumeSession = useCallback(async (session: ChatSession) => {
+    sessionId.current = session.id;
+    setCurrentSessionId(session.id);
+    setMessages(session.messages);
+    setVideoData(session.videoData);
+    setIndexingIds(new Set());
+    setUrls([]);
+    setError(null);
+
+    if (session.videoIds.length === 0) return;
+
+    const videoUrls = session.videoIds.map((id) => `https://www.youtube.com/watch?v=${id}`);
+    setIsIngesting(true);
+    try {
+      const result = await api.ingestVideos(videoUrls);
+      setVideoData((prev) => ({ ...prev, ...result.videos }));
+      setIndexingIds((prev) => {
+        const next = new Set(prev);
+        for (const id of Object.keys(result.videos)) next.add(id);
+        return next;
+      });
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? `Could not reload session videos: ${err.message}`
+          : "Could not reload session videos."
+      );
+    } finally {
+      setIsIngesting(false);
+    }
+  }, []);
+
+  const handleDeleteSession = useCallback((sid: string) => {
+    setSessions((prev) => prev.filter((s) => s.id !== sid));
+    api.deleteSession(sid).catch(() => {});
+  }, []);
+
+  const handleReset = useCallback(() => {
+    api.resetVideos().catch(() => {});
+    const newId = crypto.randomUUID();
+    sessionId.current = newId;
+    setCurrentSessionId(newId);
+    setMessages([]);
+    setVideoData({});
+    setIndexingIds(new Set());
+    setSessions([]);
+    setUrls([]);
     setError(null);
   }, []);
 
@@ -197,6 +291,17 @@ export default function Page() {
                 <span className="text-xs text-zinc-400">
                   {Object.keys(videoData).length} video{Object.keys(videoData).length !== 1 ? "s" : ""} loaded
                 </span>
+                <button
+                  type="button"
+                  onClick={handleReset}
+                  className="flex items-center gap-1 text-xs text-zinc-400 hover:text-red-500"
+                  title="Clear all videos, chats, and history"
+                >
+                  <svg className="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor">
+                    <path fillRule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z" clipRule="evenodd" />
+                  </svg>
+                  Reset all
+                </button>
               </div>
               <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
                 {Object.entries(videoData).map(([key, meta], i) => (
@@ -216,6 +321,13 @@ export default function Page() {
               Videos will appear here after ingestion
             </div>
           )}
+
+          <SessionList
+            sessions={sessions}
+            activeId={currentSessionId}
+            onResume={handleResumeSession}
+            onDelete={handleDeleteSession}
+          />
         </aside>
 
         <section className="min-w-0 flex-1 overflow-hidden">
@@ -225,6 +337,7 @@ export default function Page() {
             onNewChat={handleNewChat}
             disabled={!hasVideos || isChatLoading || isIndexing}
             isLoading={isChatLoading}
+            videoCount={Object.keys(videoData).length}
           />
         </section>
       </main>

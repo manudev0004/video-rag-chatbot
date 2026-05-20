@@ -24,3 +24,12 @@ export interface IngestResponse {
   status: string;
   videos: Record<string, VideoMetadata>;
 }
+
+export interface ChatSession {
+  id: string;
+  title: string;
+  messages: ChatMessage[];
+  videoIds: string[];
+  videoData: Record<string, VideoMetadata>;
+  createdAt: number;
+}

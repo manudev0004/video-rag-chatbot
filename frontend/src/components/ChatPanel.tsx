@@ -26,9 +26,17 @@ interface ChatPanelProps {
   onNewChat?: () => void;
   disabled: boolean;
   isLoading: boolean;
+  videoCount: number;
 }
 
-const SUGGESTIONS = [
+const singleVideoSuggestions = [
+  "What is this video mainly about?",
+  "What are the key takeaways from this video?",
+  "How does the creator present their argument?",
+  "Who is the target audience for this video?",
+];
+
+const twoVideoSuggestions = [
   "What is each video mainly about?",
   "How do the two videos differ in tone and style?",
   "Which video has better audience engagement and why?",
@@ -44,7 +52,8 @@ function SourceList({ sources }: { sources: Array<Record<string, unknown>> }) {
         return (
           <span
             key={i}
-            className="rounded-full bg-zinc-100 px-2 py-0.5 text-xs text-zinc-500"
+            className="max-w-[200px] truncate rounded-full bg-zinc-100 px-2 py-0.5 text-xs text-zinc-500"
+            title={label}
           >
             {label}
           </span>
@@ -68,9 +77,10 @@ function StreamingDots() {
   );
 }
 
-export default function ChatPanel({ messages, onSend, onNewChat, disabled, isLoading }: ChatPanelProps) {
+export default function ChatPanel({ messages, onSend, onNewChat, disabled, isLoading, videoCount }: ChatPanelProps) {
   const [input, setInput] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
+  const suggestions = videoCount >= 2 ? twoVideoSuggestions : singleVideoSuggestions;
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -106,8 +116,11 @@ export default function ChatPanel({ messages, onSend, onNewChat, disabled, isLoa
           <button
             type="button"
             onClick={onNewChat}
-            className="text-xs text-zinc-400 hover:text-zinc-700"
+            className="flex items-center gap-1 text-xs text-zinc-400 hover:text-zinc-700"
           >
+            <svg className="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor">
+              <path fillRule="evenodd" d="M10 3a1 1 0 011 1v5h5a1 1 0 110 2h-5v5a1 1 0 11-2 0v-5H4a1 1 0 110-2h5V4a1 1 0 011-1z" clipRule="evenodd" />
+            </svg>
             New chat
           </button>
         )}
@@ -117,7 +130,7 @@ export default function ChatPanel({ messages, onSend, onNewChat, disabled, isLoa
           <div className="flex h-full flex-col items-center justify-center gap-4 py-8">
             <p className="text-sm text-zinc-400">Ask anything about the videos</p>
             <div className="grid grid-cols-1 gap-2 w-full max-w-sm">
-              {SUGGESTIONS.map((q) => (
+              {suggestions.map((q) => (
                 <button
                   key={q}
                   type="button"
@@ -166,7 +179,7 @@ export default function ChatPanel({ messages, onSend, onNewChat, disabled, isLoa
 
         {!isStreaming && lastMessage?.role === "assistant" && (
           <div className="flex flex-wrap gap-2 pt-2">
-            {SUGGESTIONS.map((q) => (
+            {suggestions.map((q) => (
               <button
                 key={q}
                 type="button"

@@ -282,8 +282,9 @@ export default function Page() {
         <aside className="flex w-[40%] shrink-0 flex-col gap-3 overflow-y-auto">
           {isIngesting && !hasVideos ? (
             <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-              <VideoCard label="Video 1" data={null} loading={true} />
-              <VideoCard label="Video 2" data={null} loading={true} />
+              {urls.filter((u) => u.trim() !== "").map((_, i) => (
+                <VideoCard key={i} label={`Video ${i + 1}`} data={null} loading={true} />
+              ))}
             </div>
           ) : hasVideos ? (
             <>

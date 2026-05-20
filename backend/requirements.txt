@@ -13,3 +13,4 @@ python-dotenv
 sse-starlette
 uvicorn
 youtube-transcript-api
+yt-dlp

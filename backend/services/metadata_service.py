@@ -20,10 +20,27 @@ def _metadata_via_ytdlp(url: str) -> dict:
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
 
-    views = int(info.get("view_count") or 0)
-    likes = int(info.get("like_count") or 0)
-    comments = int(info.get("comment_count") or 0)
-    engagement_rate = round((likes + comments) / views * 100, 4) if views > 0 else 0.0
+    raw_views = info.get("view_count")
+    views = int(raw_views) if raw_views is not None else None
+    likes = int(info.get("like_count")) if info.get("like_count") is not None else None
+    comments = int(info.get("comment_count")) if info.get("comment_count") is not None else None
+
+    # Facebook doesn't expose likes via the API; parse reactions count from the title
+    # e.g. "119K views · 464 reactions | Why was Queen Maeve..."
+    if likes is None:
+        title_str = info.get("title", "")
+        m = re.search(r"([\d,.]+[KkMm]?)\s+reactions?", title_str, re.IGNORECASE)
+        if m:
+            raw = m.group(1).replace(",", "")
+            factor = {"k": 1_000, "m": 1_000_000}
+            suffix = raw[-1].lower()
+            if suffix in factor:
+                likes = int(float(raw[:-1]) * factor[suffix])
+            else:
+                likes = int(float(raw))
+    known_likes = likes or 0
+    known_comments = comments or 0
+    engagement_rate = round((known_likes + known_comments) / views * 100, 4) if views else 0.0
 
     raw_date = info.get("upload_date", "")
     upload_date = (
@@ -47,7 +64,7 @@ def _metadata_via_ytdlp(url: str) -> dict:
         "hashtags": hashtags,
         "thumbnail_url": info.get("thumbnail", ""),
         "engagement_rate": engagement_rate,
-        "subscriber_count": int(info.get("channel_follower_count") or 0),
+        "subscriber_count": int(info.get("channel_follower_count")) if info.get("channel_follower_count") is not None else None,
     }
 
 

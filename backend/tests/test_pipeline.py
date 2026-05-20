@@ -2,7 +2,7 @@ import sys
 import os
 import logging
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from dotenv import load_dotenv
 
@@ -21,46 +21,77 @@ from backend.services.rag_service import app as rag_app
 from backend.monitoring import recent_metrics, system_info
 
 
-VIDEO_A_URL = "https://www.youtube.com/watch?v=SVTPv4sI_Jc"
-VIDEO_B_URL = "https://www.youtube.com/watch?v=B3m3AMRlYfc"
+DEFAULT_URLS = [
+    "https://www.youtube.com/watch?v=SVTPv4sI_Jc",
+    "https://www.youtube.com/watch?v=B3m3AMRlYfc",
+]
 
 
-def ingest_video(url: str) -> dict:
-    """Fetch transcript and metadata for a video, chunk and embed into ChromaDB."""
+def ingest_video(url: str) -> dict | None:
+    """Fetch transcript and metadata for a video, chunk and embed into ChromaDB.
+
+    Returns metadata dict on success, None on failure.
+    """
     logger.info("Ingesting %s", url)
-    transcript = get_transcript(url)
-    metadata = get_video_metadata(url)
+    try:
+        transcript = get_transcript(url)
+    except RuntimeError as exc:
+        logger.error("Transcript failed for %s: %s", url, exc)
+        return None
+    try:
+        metadata = get_video_metadata(url)
+    except (ValueError, RuntimeError) as exc:
+        logger.error("Metadata failed for %s: %s", url, exc)
+        return None
     chunks = chunk_transcript(transcript, {
         "video_id": metadata["video_id"],
         "title": metadata["title"],
         "creator": metadata["creator"],
         "engagement_rate": metadata["engagement_rate"],
     })
+    if not chunks:
+        logger.warning("No chunks produced for %s, transcript may be empty", url)
+        return None
     stored = store_chunks(chunks)
     logger.info("Stored %d chunks for video_id=%s", stored, metadata["video_id"])
     return metadata
 
 
-def main() -> None:
-    """Run the full pipeline: ingest two videos, ask one question, print results."""
-    meta_a = ingest_video(VIDEO_A_URL)
-    meta_b = ingest_video(VIDEO_B_URL)
+def main(urls: list[str]) -> None:
+    """Run the full pipeline: ingest videos, ask a question, print results."""
+    metas = []
+    for url in urls:
+        meta = ingest_video(url)
+        if meta:
+            metas.append(meta)
+
+    if not metas:
+        print("No videos ingested successfully. Exiting.")
+        return
+
+    question = (
+        "Which video has better engagement and why?"
+        if len(metas) >= 2
+        else "What is this video mainly about and who is the target audience?"
+    )
 
     result = rag_app.invoke({
-        "question": "Which video has better engagement and why?",
+        "question": question,
         "chat_history": [],
-        "video_ids": [meta_a["video_id"], meta_b["video_id"]],
+        "video_ids": [m["video_id"] for m in metas],
         "contexts": [],
         "sources": [],
         "answer": "",
     })
 
+    print(f"\nQuestion: {question}")
     print("\nAnswer:")
     print(result["answer"])
 
-    print("\nSources:")
-    for s in result["sources"]:
-        print(f"  [{s['video_id']}] {s['title']} - chunk {s['chunk_index']} (dist={s['distance']})")
+    if result.get("sources"):
+        print("\nSources:")
+        for s in result["sources"]:
+            print(f"  [{s['video_id']}] {s['title']} - chunk {s['chunk_index']} (dist={s['distance']})")
 
 
 def print_metrics() -> None:
@@ -89,6 +120,7 @@ def print_metrics() -> None:
 
 if __name__ == "__main__":
     show_metrics = "--metrics" in sys.argv
-    main()
+    urls = [a for a in sys.argv[1:] if not a.startswith("--")] or DEFAULT_URLS
+    main(urls)
     if show_metrics:
         print_metrics()

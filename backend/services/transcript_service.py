@@ -3,8 +3,15 @@ import re
 import logging
 
 from dotenv import load_dotenv
-from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
-from youtube_transcript_api._errors import CouldNotRetrieveTranscript
+from youtube_transcript_api import YouTubeTranscriptApi
+from youtube_transcript_api._errors import (
+    TranscriptsDisabled,
+    NoTranscriptFound,
+    CouldNotRetrieveTranscript,
+    VideoUnavailable,
+    AgeRestricted,
+    IpBlocked,
+)
 
 from ..monitoring import track
 
@@ -36,12 +43,19 @@ def get_transcript(url: str) -> str:
         api = YouTubeTranscriptApi()
         fetched = api.fetch(video_id)
     except TranscriptsDisabled:
-        raise RuntimeError(f"Transcripts are disabled for video: {video_id}")
+        raise RuntimeError(f"Transcripts are disabled for video {video_id}.")
     except NoTranscriptFound:
-        raise RuntimeError(f"No transcript found for video: {video_id}")
+        raise RuntimeError(f"No transcript found for video {video_id}. It may not have captions.")
+    except VideoUnavailable:
+        raise RuntimeError(f"Video {video_id} is unavailable (private or deleted).")
+    except AgeRestricted:
+        raise RuntimeError(f"Video {video_id} is age-restricted and cannot be accessed without login.")
+    except IpBlocked:
+        raise RuntimeError("YouTube has blocked this IP temporarily. Try again later.")
     except CouldNotRetrieveTranscript as exc:
-        raise RuntimeError(f"YouTube blocked the transcript request for {video_id}: {exc}")
+        raise RuntimeError(f"Could not retrieve transcript for {video_id}: {exc}")
 
-    transcript = " ".join(snippet.text for snippet in fetched)
+    parts = [snippet.text.replace("\n", " ").strip() for snippet in fetched]
+    transcript = " ".join(p for p in parts if p)
     logger.info("Transcript fetched: %d characters", len(transcript))
     return transcript

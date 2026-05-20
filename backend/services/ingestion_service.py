@@ -13,6 +13,7 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 _chroma_client = None
+_embeddings_model = None
 
 
 def _get_chroma_client():
@@ -25,11 +26,14 @@ def _get_chroma_client():
 
 
 def get_embeddings_model() -> GoogleGenerativeAIEmbeddings:
-    """Return a configured Gemini embeddings model."""
-    model = os.getenv("EMBEDDING_MODEL")
-    if not model:
-        raise RuntimeError("EMBEDDING_MODEL is not set in the environment.")
-    return GoogleGenerativeAIEmbeddings(model=model)
+    """Return the shared Gemini embeddings model, creating it on first call."""
+    global _embeddings_model
+    if _embeddings_model is None:
+        model = os.getenv("EMBEDDING_MODEL")
+        if not model:
+            raise RuntimeError("EMBEDDING_MODEL is not set in the environment.")
+        _embeddings_model = GoogleGenerativeAIEmbeddings(model=model)
+    return _embeddings_model
 
 
 def get_collection() -> chromadb.Collection:
@@ -101,9 +105,13 @@ def search_chunks(query_embedding: list[float], video_id: str | None = None, k: 
     collection = get_collection()
     where = {"video_id": video_id} if video_id else None
 
+    total = collection.count()
+    if total == 0:
+        return []
+
     results = collection.query(
         query_embeddings=[query_embedding],
-        n_results=k,
+        n_results=min(k, total),
         where=where,
         include=["documents", "metadatas", "distances"],
     )

@@ -4,13 +4,13 @@ export interface VideoMetadata {
   creator: string;
   upload_date: string;
   duration_seconds: number;
-  views: number;
-  likes: number;
-  comments: number;
+  views: number | null;
+  likes: number | null;
+  comments: number | null;
   hashtags: string[];
   thumbnail_url: string;
   engagement_rate: number;
-  subscriber_count: number;
+  subscriber_count: number | null;
 }
 
 export interface ChatMessage {
@@ -23,6 +23,7 @@ export interface ChatMessage {
 export interface IngestResponse {
   status: string;
   videos: Record<string, VideoMetadata>;
+  errors: Record<string, string>;
 }
 
 export interface ChatSession {

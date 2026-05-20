@@ -26,18 +26,19 @@ class VideoMetadata(BaseModel):
     creator: str
     upload_date: str
     duration_seconds: int
-    views: int
-    likes: int
-    comments: int
+    views: int | None
+    likes: int | None
+    comments: int | None
     hashtags: list[str]
     thumbnail_url: str
     engagement_rate: float
-    subscriber_count: int
+    subscriber_count: int | None
 
 
 class IngestResponse(BaseModel):
     status: str
     videos: dict[str, VideoMetadata]
+    errors: dict[str, str] = {}
 
 
 class ChatResponse(BaseModel):

@@ -5,12 +5,17 @@ interface VideoCardProps {
   label: string;
   data: VideoMetadata | null;
   loading: boolean;
+  indexing?: boolean;
+  onDelete?: () => void;
 }
 
 function formatDuration(seconds: number): string {
-  const m = Math.floor(seconds / 60);
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
   const s = seconds % 60;
-  return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+  const mm = String(m).padStart(2, "0");
+  const ss = String(s).padStart(2, "0");
+  return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
 }
 
 function formatCount(n: number): string {
@@ -31,9 +36,22 @@ function Skeleton({ className }: { className: string }) {
 
 const STATS = ["Views", "Likes", "Comments"] as const;
 
-export default function VideoCard({ label, data, loading }: VideoCardProps) {
+export default function VideoCard({ label, data, loading, indexing, onDelete }: VideoCardProps) {
   return (
-    <div className="flex h-full flex-col gap-3 rounded-xl border border-zinc-200 bg-white p-4 shadow-sm">
+    <div className="relative flex h-full flex-col gap-3 rounded-xl border border-zinc-200 bg-white p-4 shadow-sm">
+      {onDelete && (
+        <button
+          type="button"
+          onClick={onDelete}
+          aria-label="Remove video"
+          className="absolute right-2 top-2 rounded p-0.5 text-zinc-300 hover:bg-zinc-100 hover:text-zinc-600"
+        >
+          <svg className="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor">
+            <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
+          </svg>
+        </button>
+      )}
+
       <p className="shrink-0 text-xs font-semibold uppercase tracking-wide text-zinc-400">
         {label}
       </p>
@@ -109,6 +127,13 @@ export default function VideoCard({ label, data, loading }: VideoCardProps) {
                   {tag.startsWith("#") ? tag : `#${tag}`}
                 </span>
               ))}
+            </div>
+          )}
+
+          {indexing && (
+            <div className="flex shrink-0 items-center gap-1.5 text-xs text-amber-600">
+              <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-amber-400" />
+              Indexing...
             </div>
           )}
         </>

@@ -23,6 +23,7 @@ const mdComponents: Components = {
 interface ChatPanelProps {
   messages: ChatMessage[];
   onSend: (text: string) => void;
+  onNewChat?: () => void;
   disabled: boolean;
   isLoading: boolean;
 }
@@ -67,7 +68,7 @@ function StreamingDots() {
   );
 }
 
-export default function ChatPanel({ messages, onSend, disabled, isLoading }: ChatPanelProps) {
+export default function ChatPanel({ messages, onSend, onNewChat, disabled, isLoading }: ChatPanelProps) {
   const [input, setInput] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -99,6 +100,18 @@ export default function ChatPanel({ messages, onSend, disabled, isLoading }: Cha
 
   return (
     <div className="flex h-full flex-col rounded-xl border border-zinc-200 bg-white shadow-sm">
+      <div className="flex shrink-0 items-center justify-between border-b border-zinc-100 px-4 py-2.5">
+        <span className="text-xs font-medium text-zinc-400">Chat</span>
+        {messages.length > 0 && onNewChat && (
+          <button
+            type="button"
+            onClick={onNewChat}
+            className="text-xs text-zinc-400 hover:text-zinc-700"
+          >
+            New chat
+          </button>
+        )}
+      </div>
       <div className="flex-1 overflow-y-auto px-4 py-4 space-y-4">
         {messages.length === 0 && (
           <div className="flex h-full flex-col items-center justify-center gap-4 py-8">

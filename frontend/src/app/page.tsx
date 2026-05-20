@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useCallback } from "react";
+import { useState, useRef, useCallback, useEffect } from "react";
 import type { VideoMetadata, ChatMessage } from "@/types";
 import * as api from "@/services/api";
 import URLInput from "@/components/URLInput";
@@ -14,10 +14,35 @@ export default function Page() {
   const [isIngesting, setIsIngesting] = useState(false);
   const [isChatLoading, setIsChatLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [indexingIds, setIndexingIds] = useState<Set<string>>(new Set());
 
   const sessionId = useRef<string>(crypto.randomUUID());
+  const videoDataRef = useRef(videoData);
+
+  // keep a ref so handleChat always reads the current video set without being in its deps
+  videoDataRef.current = videoData;
 
   const hasVideos = Object.keys(videoData).length > 0;
+  const isIndexing = indexingIds.size > 0;
+
+  // poll /ingest/status until all pending videos are indexed
+  useEffect(() => {
+    if (indexingIds.size === 0) return;
+    const ids = [...indexingIds];
+    const timer = setInterval(async () => {
+      try {
+        const status = await api.getIngestStatus(ids);
+        const pending = Object.entries(status)
+          .filter(([, v]) => v !== "ready")
+          .map(([k]) => k);
+        setIndexingIds(new Set(pending));
+        if (pending.length === 0) clearInterval(timer);
+      } catch {
+        // ignore poll errors, will retry on next tick
+      }
+    }, 2000);
+    return () => clearInterval(timer);
+  }, [indexingIds]);
 
   const handleIngest = useCallback(async () => {
     const validUrls = urls.filter((u) => u.trim() !== "");
@@ -28,8 +53,14 @@ export default function Page() {
 
     try {
       const result = await api.ingestVideos(validUrls);
-      setVideoData(result.videos);
-      setMessages([]);
+      // merge new videos into existing set (additive)
+      setVideoData((prev) => ({ ...prev, ...result.videos }));
+      // mark all returned videos as potentially indexing; first poll will clear ready ones
+      setIndexingIds((prev) => {
+        const next = new Set(prev);
+        for (const id of Object.keys(result.videos)) next.add(id);
+        return next;
+      });
     } catch (err) {
       setError(
         err instanceof Error
@@ -40,6 +71,28 @@ export default function Page() {
       setIsIngesting(false);
     }
   }, [urls]);
+
+  const handleDeleteVideo = useCallback((videoId: string) => {
+    setVideoData((prev) => {
+      const next = { ...prev };
+      delete next[videoId];
+      return next;
+    });
+    setIndexingIds((prev) => {
+      const next = new Set(prev);
+      next.delete(videoId);
+      return next;
+    });
+    api.deleteVideo(videoId).catch(() => {});
+  }, []);
+
+  const handleNewChat = useCallback(() => {
+    sessionId.current = crypto.randomUUID();
+    setMessages([]);
+    setVideoData({});
+    setIndexingIds(new Set());
+    setError(null);
+  }, []);
 
   const handleChat = useCallback(async (question: string) => {
     const userMessage: ChatMessage = { role: "user", content: question };
@@ -53,6 +106,7 @@ export default function Page() {
       await api.streamChat(
         question,
         sessionId.current,
+        Object.keys(videoDataRef.current),
         (token) => {
           setMessages((prev) => {
             const next = [...prev];
@@ -131,18 +185,32 @@ export default function Page() {
       </header>
 
       <main className="flex flex-1 gap-4 overflow-hidden p-4">
-        <aside className="w-[40%] shrink-0 overflow-y-auto">
+        <aside className="flex w-[40%] shrink-0 flex-col gap-3 overflow-y-auto">
           {isIngesting && !hasVideos ? (
             <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
               <VideoCard label="Video 1" data={null} loading={true} />
               <VideoCard label="Video 2" data={null} loading={true} />
             </div>
           ) : hasVideos ? (
-            <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-              {Object.entries(videoData).map(([key, meta]) => (
-                <VideoCard key={key} label={key} data={meta} loading={false} />
-              ))}
-            </div>
+            <>
+              <div className="flex shrink-0 items-center justify-between px-0.5">
+                <span className="text-xs text-zinc-400">
+                  {Object.keys(videoData).length} video{Object.keys(videoData).length !== 1 ? "s" : ""} loaded
+                </span>
+              </div>
+              <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+                {Object.entries(videoData).map(([key, meta], i) => (
+                  <VideoCard
+                    key={key}
+                    label={`Video ${i + 1}`}
+                    data={meta}
+                    loading={false}
+                    indexing={indexingIds.has(meta.video_id)}
+                    onDelete={() => handleDeleteVideo(meta.video_id)}
+                  />
+                ))}
+              </div>
+            </>
           ) : (
             <div className="flex h-48 items-center justify-center rounded-xl border border-dashed border-zinc-300 text-sm text-zinc-400">
               Videos will appear here after ingestion
@@ -154,7 +222,8 @@ export default function Page() {
           <ChatPanel
             messages={messages}
             onSend={handleChat}
-            disabled={!hasVideos || isChatLoading}
+            onNewChat={handleNewChat}
+            disabled={!hasVideos || isChatLoading || isIndexing}
             isLoading={isChatLoading}
           />
         </section>

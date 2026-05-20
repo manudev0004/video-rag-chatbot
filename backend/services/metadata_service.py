@@ -1,5 +1,6 @@
 import os
 import re
+import ssl
 import logging
 
 import isodate
@@ -11,14 +12,33 @@ from .transcript_service import extract_video_id, is_youtube_url
 load_dotenv()
 logger = logging.getLogger(__name__)
 
+_reactions_re = re.compile(r"([\d,.]+[KkMm]?)\s+reactions?", re.IGNORECASE)
 
-def _metadata_via_ytdlp(url: str) -> dict:
+_yt_service = None
+
+
+def _get_yt_service():
+    """Return the shared YouTube API client, building it on first call."""
+    global _yt_service
+    if _yt_service is None:
+        _yt_service = build("youtube", "v3", developerKey=os.environ["YOUTUBE_API_KEY"])
+    return _yt_service
+
+
+def reset_yt_service() -> None:
+    """Drop the cached client so the next call builds a fresh one."""
+    global _yt_service
+    _yt_service = None
+
+
+def _metadata_via_ytdlp(url: str, info: dict | None = None) -> dict:
     """Extract video metadata for non-YouTube URLs using yt-dlp."""
     import yt_dlp
 
-    ydl_opts = {"skip_download": True, "quiet": True, "no_warnings": True}
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=False)
+    if info is None:
+        ydl_opts = {"skip_download": True, "quiet": True, "no_warnings": True}
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
 
     raw_views = info.get("view_count")
     views = int(raw_views) if raw_views is not None else None
@@ -29,7 +49,7 @@ def _metadata_via_ytdlp(url: str) -> dict:
     # e.g. "119K views · 464 reactions | Why was Queen Maeve..."
     if likes is None:
         title_str = info.get("title", "")
-        m = re.search(r"([\d,.]+[KkMm]?)\s+reactions?", title_str, re.IGNORECASE)
+        m = _reactions_re.search(title_str)
         if m:
             raw = m.group(1).replace(",", "")
             factor = {"k": 1_000, "m": 1_000_000}
@@ -68,24 +88,35 @@ def _metadata_via_ytdlp(url: str) -> dict:
     }
 
 
-def get_video_metadata(url: str) -> dict:
+def get_video_metadata(url: str, info: dict | None = None) -> dict:
     """Fetch and return metadata for a video URL.
 
     For YouTube URLs uses the YouTube Data API v3, yt-dlp for everything else.
+    Pass info to skip the yt-dlp extract_info network call when already fetched.
     """
     if not is_youtube_url(url):
         logger.info("Fetching metadata via yt-dlp for: %s", url)
-        return _metadata_via_ytdlp(url)
+        return _metadata_via_ytdlp(url, info)
 
     video_id = extract_video_id(url)
     logger.info("Fetching metadata for video_id=%s", video_id)
 
-    youtube = build("youtube", "v3", developerKey=os.environ["YOUTUBE_API_KEY"])
+    youtube = _get_yt_service()
 
-    video_resp = youtube.videos().list(
-        part="snippet,statistics,contentDetails",
-        id=video_id,
-    ).execute()
+    try:
+        video_resp = youtube.videos().list(
+            part="snippet,statistics,contentDetails",
+            id=video_id,
+        ).execute()
+    except ssl.SSLError:
+        # Stale connection from the pool; reset and retry once.
+        logger.warning("SSL error fetching metadata for %s, retrying with fresh client", video_id)
+        reset_yt_service()
+        youtube = _get_yt_service()
+        video_resp = youtube.videos().list(
+            part="snippet,statistics,contentDetails",
+            id=video_id,
+        ).execute()
 
     if not video_resp.get("items"):
         raise ValueError(f"No video found for ID: {video_id}")

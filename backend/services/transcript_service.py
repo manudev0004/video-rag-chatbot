@@ -22,33 +22,37 @@ logger = logging.getLogger(__name__)
 
 _ENGLISH_LANGS = ["en", "en-US", "en-GB", "en-orig"]
 
+_url_patterns = [
+    # YouTube - exactly 11 chars; lookahead stops it matching Facebook's longer numeric IDs
+    r"(?:v=)([A-Za-z0-9_-]{11})(?![A-Za-z0-9_-])",
+    r"youtu\.be/([A-Za-z0-9_-]{11})",
+    r"(?:shorts|embed|live|v)/([A-Za-z0-9_-]{11})",
+    # Instagram
+    r"instagram\.com/(?:reels?|p|tv)/([A-Za-z0-9_-]+)",
+    r"instagram\.com/[^/?#]+/reel/([A-Za-z0-9_-]+)",
+    r"instagram\.com/stories/[^/?#]+/(\d+)",
+    # Facebook - direct video/reel
+    r"facebook\.com/reel/(\d+)",
+    r"facebook\.com/[^/?#]+/videos/(?:[^/?#]+/)?(\d+)",
+    r"facebook\.com/(?:video\.php|watch).*?[?&]v=(\d+)",
+    # Facebook - posts and permalinks
+    r"facebook\.com/groups/[^/?#]+/(?:posts|permalink)/([A-Za-z0-9]+)",
+    r"facebook\.com/[^/?#]+/posts/([A-Za-z0-9]+)",
+    r"facebook\.com/permalink\.php.*?story_fbid=([A-Za-z0-9]+)",
+    r"facebook\.com/story\.php.*?story_fbid=([A-Za-z0-9]+)",
+    # Facebook - share short links
+    r"facebook\.com/share/[rv]/([A-Za-z0-9_-]+)",
+    # fb.watch
+    r"fb\.watch/([A-Za-z0-9_-]+)",
+]
+
+_youtube_re = re.compile(r"youtube\.com|youtu\.be")
+_QUIET_OPTS: dict = {"skip_download": True, "quiet": True, "no_warnings": True}
+
 
 def extract_video_id(url: str) -> str:
     """Extract and return the video ID from a URL. Supports YouTube, Instagram, and Facebook."""
-    patterns = [
-        # YouTube - exactly 11 chars; lookahead stops it matching Facebook's longer numeric IDs
-        r"(?:v=)([A-Za-z0-9_-]{11})(?![A-Za-z0-9_-])",
-        r"youtu\.be/([A-Za-z0-9_-]{11})",
-        r"(?:shorts|embed|live|v)/([A-Za-z0-9_-]{11})",
-        # Instagram
-        r"instagram\.com/(?:reels?|p|tv)/([A-Za-z0-9_-]+)",
-        r"instagram\.com/[^/?#]+/reel/([A-Za-z0-9_-]+)",
-        r"instagram\.com/stories/[^/?#]+/(\d+)",
-        # Facebook - direct video/reel
-        r"facebook\.com/reel/(\d+)",
-        r"facebook\.com/[^/?#]+/videos/(?:[^/?#]+/)?(\d+)",
-        r"facebook\.com/(?:video\.php|watch).*?[?&]v=(\d+)",
-        # Facebook - posts and permalinks
-        r"facebook\.com/groups/[^/?#]+/(?:posts|permalink)/([A-Za-z0-9]+)",
-        r"facebook\.com/[^/?#]+/posts/([A-Za-z0-9]+)",
-        r"facebook\.com/permalink\.php.*?story_fbid=([A-Za-z0-9]+)",
-        r"facebook\.com/story\.php.*?story_fbid=([A-Za-z0-9]+)",
-        # Facebook - share short links
-        r"facebook\.com/share/[rv]/([A-Za-z0-9_-]+)",
-        # fb.watch
-        r"fb\.watch/([A-Za-z0-9_-]+)",
-    ]
-    for pattern in patterns:
+    for pattern in _url_patterns:
         match = re.search(pattern, url)
         if match:
             return match.group(1)
@@ -57,7 +61,18 @@ def extract_video_id(url: str) -> str:
 
 def is_youtube_url(url: str) -> bool:
     """Return True if the URL points to a YouTube video."""
-    return bool(re.search(r"(youtube\.com|youtu\.be)", url))
+    return bool(_youtube_re.search(url))
+
+
+def fetch_ydlp_info(url: str) -> dict:
+    """Run yt-dlp extract_info once and return the info dict. Raises RuntimeError on failure."""
+    import yt_dlp
+    from yt_dlp.utils import DownloadError
+    with yt_dlp.YoutubeDL(_QUIET_OPTS) as ydl:
+        try:
+            return ydl.extract_info(url, download=False)
+        except DownloadError as exc:
+            raise RuntimeError(f"yt-dlp failed to extract info for {url}: {exc}")
 
 
 def _parse_vtt(path: str) -> str:
@@ -78,7 +93,7 @@ def _parse_vtt(path: str) -> str:
             if cleaned:
                 lines.append(cleaned)
 
-    # Auto-captions repeat lines for continuity — deduplicate consecutive dupes
+    # Auto-captions repeat lines; deduplicate consecutive dupes
     deduped: list[str] = []
     for line in lines:
         if not deduped or line != deduped[-1]:
@@ -104,16 +119,15 @@ def _fallback_from_metadata(info: dict, url: str) -> str:
     return text
 
 
-def _fetch_via_ytdlp(url: str) -> str:
+def _fetch_via_ytdlp(url: str, info: dict | None = None) -> str:
     """Fetch subtitles via yt-dlp. Supports YouTube, YouTube Shorts, Instagram, Facebook."""
     import yt_dlp
     from yt_dlp.utils import DownloadError
 
-    quiet_opts: dict = {"skip_download": True, "quiet": True, "no_warnings": True}
-
     # Step 1: find out what subtitle languages are actually available
-    with yt_dlp.YoutubeDL(quiet_opts) as ydl:
-        info = ydl.extract_info(url, download=False)
+    if info is None:
+        with yt_dlp.YoutubeDL(_QUIET_OPTS) as ydl:
+            info = ydl.extract_info(url, download=False)
 
     manual_subs: dict = info.get("subtitles") or {}
     auto_subs: dict = info.get("automatic_captions") or {}
@@ -127,10 +141,10 @@ def _fetch_via_ytdlp(url: str) -> str:
 
     logger.info("Downloading subtitles in lang=%s via yt-dlp", chosen)
 
-    # Step 2: download only that language — no translation, no 429
+    # Step 2: download only that language; no translation fallback, no 429
     with tempfile.TemporaryDirectory() as tmpdir:
         ydl_opts = {
-            **quiet_opts,
+            **_QUIET_OPTS,
             "writesubtitles": chosen in manual_subs,
             "writeautomaticsub": chosen in auto_subs,
             "subtitleslangs": [chosen],
@@ -174,12 +188,13 @@ def _fetch_any_transcript(api: YouTubeTranscriptApi, video_id: str) -> str:
 
 
 @track("transcript_fetch")
-def get_transcript(url: str) -> str:
+def get_transcript(url: str, info: dict | None = None) -> str:
     """Fetch the full transcript for a video URL as plain text.
 
     For YouTube: tries youtube-transcript-api (English first, then any language),
     falls back to yt-dlp on persistent failure.
     For Instagram and Facebook: uses yt-dlp directly.
+    Pass info to skip the yt-dlp extract_info network call when already fetched.
     """
     if is_youtube_url(url):
         video_id = extract_video_id(url)
@@ -198,7 +213,7 @@ def get_transcript(url: str) -> str:
         except IpBlocked:
             raise RuntimeError("YouTube has blocked this IP temporarily. Try again later.")
         except NoTranscriptFound:
-            # English not available — try any language the video has
+            # English not available; try any language the video has
             logger.info("No English transcript for %s, trying any available language", video_id)
             try:
                 return _fetch_any_transcript(api, video_id)
@@ -211,7 +226,7 @@ def get_transcript(url: str) -> str:
 
     logger.info("Fetching transcript via yt-dlp: %s", url)
     try:
-        return _fetch_via_ytdlp(url)
+        return _fetch_via_ytdlp(url, info)
     except RuntimeError:
         raise
     except Exception as exc:

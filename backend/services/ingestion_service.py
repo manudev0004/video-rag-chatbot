@@ -1,4 +1,8 @@
 import os
+import re
+import shutil
+import threading
+import time
 import uuid
 import logging
 
@@ -13,15 +17,22 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 _chroma_client = None
+_collection = None
 _embeddings_model = None
+_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+# Serializes Gemini embed calls to avoid free-tier quota exhaustion from concurrent tasks.
+_embed_lock = threading.Lock()
+# prevents two threads racing to create the same PersistentClient
+_chroma_lock = threading.Lock()
 
 
 def _get_chroma_client():
     global _chroma_client
-    if _chroma_client is None:
-        _chroma_client = chromadb.PersistentClient(
-            path=os.getenv("CHROMA_PATH", "./backend/chroma_db")
-        )
+    with _chroma_lock:
+        if _chroma_client is None:
+            _chroma_client = chromadb.PersistentClient(
+                path=os.getenv("CHROMA_PATH", "./backend/chroma_db")
+            )
     return _chroma_client
 
 
@@ -38,16 +49,40 @@ def get_embeddings_model() -> GoogleGenerativeAIEmbeddings:
 
 def get_collection() -> chromadb.Collection:
     """Return the persistent ChromaDB collection for video chunks."""
-    return _get_chroma_client().get_or_create_collection("video_chunks")
+    global _collection
+    if _collection is None:
+        client = _get_chroma_client()  # acquires and releases _chroma_lock
+        with _chroma_lock:
+            if _collection is None:
+                _collection = client.get_or_create_collection("video_chunks")
+    return _collection
+
+
+def reset_collection() -> None:
+    """Drop and recreate the collection, cleaning up orphaned segment folders.
+
+    ChromaDB 1.5.x delete_collection() removes SQLite metadata but leaves UUID
+    segment directories on disk. We delete those manually so the index starts clean.
+    """
+    global _collection
+    client = _get_chroma_client()
+    chroma_path = os.getenv("CHROMA_PATH", "./backend/chroma_db")
+    try:
+        client.delete_collection("video_chunks")
+    except Exception:
+        pass
+    # Remove orphaned UUID segment folders left behind by delete_collection
+    if os.path.exists(chroma_path):
+        for entry in os.scandir(chroma_path):
+            if entry.is_dir():
+                shutil.rmtree(entry.path)
+    _collection = client.get_or_create_collection("video_chunks")
+    logger.info("ChromaDB collection reset: segment folders removed, fresh collection created")
 
 
 def chunk_transcript(text: str, metadata: dict) -> list[dict]:
     """Split a transcript into overlapping chunks with metadata."""
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=200,
-    )
-    texts = splitter.split_text(text)
+    texts = _splitter.split_text(text)
     total = len(texts)
     return [
         {
@@ -66,6 +101,29 @@ def chunk_transcript(text: str, metadata: dict) -> list[dict]:
     ]
 
 
+def _embed_with_retry(model: GoogleGenerativeAIEmbeddings, texts: list[str], batch_index: int) -> list[list[float]]:
+    """Call embed_documents with up to 3 retries on rate-limit errors.
+
+    Holds _embed_lock so parallel store_chunks tasks don't hit the Gemini API
+    simultaneously and exhaust the free-tier quota.
+    """
+    with _embed_lock:
+        for attempt in range(3):
+            try:
+                return model.embed_documents(texts)
+            except Exception as exc:
+                msg = str(exc)
+                if "RESOURCE_EXHAUSTED" not in msg and "429" not in msg:
+                    raise
+                if attempt == 2:
+                    raise
+                m = re.search(r"retryDelay.*?(\d+)s", msg)
+                delay = int(m.group(1)) + 5 if m else 60
+                logger.warning("Rate limit hit on batch %d, retrying in %ds (attempt %d/3)", batch_index, delay, attempt + 1)
+            time.sleep(delay)
+    raise RuntimeError("embed_with_retry: unreachable")
+
+
 @track("store_chunks")
 def store_chunks(chunks: list[dict]) -> int:
     """Embed and store chunks in ChromaDB, replacing any existing chunks for the same video."""
@@ -77,17 +135,14 @@ def store_chunks(chunks: list[dict]) -> int:
 
     video_id = chunks[0]["metadata"]["video_id"]
 
-    existing = collection.get(where={"video_id": video_id}, include=[])
-    if existing["ids"]:
-        collection.delete(ids=existing["ids"])
-        logger.info("Deleted %d existing chunks for video_id=%s", len(existing["ids"]), video_id)
+    collection.delete(where={"video_id": video_id})
 
     batch_size = 100
     stored = 0
     for i in range(0, len(chunks), batch_size):
         batch = chunks[i : i + batch_size]
         texts = [c["text"] for c in batch]
-        embeddings = embeddings_model.embed_documents(texts)
+        embeddings = _embed_with_retry(embeddings_model, texts, batch_index=i)
         collection.add(
             ids=[c["id"] for c in batch],
             documents=texts,
@@ -105,25 +160,21 @@ def search_chunks(query_embedding: list[float], video_id: str | None = None, k: 
     collection = get_collection()
     where = {"video_id": video_id} if video_id else None
 
-    total = collection.count()
-    if total == 0:
-        return []
-
     results = collection.query(
         query_embeddings=[query_embedding],
-        n_results=min(k, total),
+        n_results=k,
         where=where,
         include=["documents", "metadatas", "distances"],
     )
 
-    matched_chunks = []
-    for text, metadata, distance in zip(
-        results["documents"][0],
-        results["metadatas"][0],
-        results["distances"][0],
-    ):
-        matched_chunks.append({"text": text, "metadata": metadata, "distance": distance})
-    return matched_chunks
+    docs = results["documents"][0]
+    if not docs:
+        return []
+
+    return [
+        {"text": text, "metadata": metadata, "distance": distance}
+        for text, metadata, distance in zip(docs, results["metadatas"][0], results["distances"][0])
+    ]
 
 
 def embed_query(query: str) -> list[float]:

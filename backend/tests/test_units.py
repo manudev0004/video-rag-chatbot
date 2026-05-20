@@ -115,18 +115,23 @@ class TestChunkTranscript(unittest.TestCase):
 class TestSearchChunksEmptyCollection(unittest.TestCase):
     def test_returns_empty_when_collection_is_empty(self):
         mock_col = MagicMock()
-        mock_col.count.return_value = 0
+        mock_col.query.return_value = {
+            "documents": [[]],
+            "metadatas": [[]],
+            "distances": [[]],
+        }
 
         import backend.services.ingestion_service as ing
         with patch.object(ing, "get_collection", return_value=mock_col):
             result = ing.search_chunks([0.1] * 768, video_id="abc12345678")
 
         self.assertEqual(result, [])
-        mock_col.query.assert_not_called()
+        mock_col.query.assert_called_once()
 
     def test_caps_n_results_at_collection_size(self):
+        # ChromaDB returns fewer results than k when not enough docs match.
+        # search_chunks passes k directly; no pre-count needed.
         mock_col = MagicMock()
-        mock_col.count.return_value = 2
         mock_col.query.return_value = {
             "documents": [["chunk a", "chunk b"]],
             "metadatas": [[{"video_id": "x", "title": "T", "chunk_index": 0}, {"video_id": "x", "title": "T", "chunk_index": 1}]],
@@ -137,8 +142,9 @@ class TestSearchChunksEmptyCollection(unittest.TestCase):
         with patch.object(ing, "get_collection", return_value=mock_col):
             result = ing.search_chunks([0.1] * 768, video_id="x", k=4)
 
+        # n_results is always k; ChromaDB returns however many it has
         call_kwargs = mock_col.query.call_args[1]
-        self.assertEqual(call_kwargs["n_results"], 2)
+        self.assertEqual(call_kwargs["n_results"], 4)
         self.assertEqual(len(result), 2)
 
 

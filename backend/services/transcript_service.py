@@ -75,6 +75,8 @@ _url_patterns = [
 
 _youtube_re = re.compile(r"youtube\.com|youtu\.be")
 _QUIET_OPTS: dict = {"skip_download": True, "quiet": True, "no_warnings": True}
+if _yt_proxy:
+    _QUIET_OPTS["proxy"] = _yt_proxy
 
 
 def extract_video_id(url: str) -> str:
@@ -237,10 +239,10 @@ def get_transcript(url: str, info: dict | None = None) -> str:
             raise RuntimeError(f"Video {video_id} is unavailable (private or deleted).")
         except AgeRestricted:
             raise RuntimeError(f"Video {video_id} is age-restricted and cannot be accessed without login.")
-        except IpBlocked:
-            raise RuntimeError("YouTube has blocked this IP temporarily. Try again later.")
-        except RequestBlocked:
-            raise RuntimeError("YouTube blocked this request. Try again later or configure a proxy via YT_PROXY.")
+        except (IpBlocked, RequestBlocked) as exc:
+            logger.warning("Transcript API blocked for %s (%s), falling back to yt-dlp", video_id, exc)
+        except (RequestsProxyError, RequestsConnectionError) as exc:
+            logger.warning("Proxy/connection error for %s (%s), falling back to yt-dlp", video_id, exc)
         except NoTranscriptFound:
             # English not available; try any language the video has
             logger.info("No English transcript for %s, trying any available language", video_id)

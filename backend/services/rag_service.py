@@ -1,5 +1,6 @@
 import os
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, TypedDict
 
 from dotenv import load_dotenv
@@ -25,9 +26,9 @@ class VideoAnalysisState(TypedDict):
 
 @track("retrieve_context")
 def retrieve_context(video_id: str, query_embedding: list[float], k: int = 4) -> tuple[str, list[dict]]:
-    """Search ChromaDB for relevant chunks from a specific video using a pre-computed embedding.
+    """Search ChromaDB for relevant chunks from a specific video.
 
-    Returns the formatted context string and a list of source metadata dicts.
+    Returns the context string and a list of source metadata dicts.
     """
     matched_chunks = search_chunks(query_embedding, video_id=video_id, k=k)
 
@@ -60,13 +61,17 @@ def retrieve_context(video_id: str, query_embedding: list[float], k: int = 4) ->
 def retrieve_contexts(state: VideoAnalysisState) -> dict:
     """LangGraph node: fetch context for all videos."""
     query_embedding = embed_query(state["question"])
+    video_ids = state["video_ids"]
     contexts, sources = [], []
-    for video_id in state["video_ids"]:
-        context, video_sources = retrieve_context(video_id, query_embedding)
-        contexts.append(context)
-        sources.extend(video_sources)
 
-    # one source entry per video — keep the chunk closest to the query
+    with ThreadPoolExecutor(max_workers=len(video_ids) or 1) as pool:
+        futures = [pool.submit(retrieve_context, vid, query_embedding) for vid in video_ids]
+        for fut in futures:
+            context, video_sources = fut.result()
+            contexts.append(context)
+            sources.extend(video_sources)
+
+    # one source entry per video, keep the closest chunk
     best: dict[str, dict] = {}
     for s in sources:
         vid = s["video_id"]
@@ -76,26 +81,44 @@ def retrieve_contexts(state: VideoAnalysisState) -> dict:
     return {"contexts": contexts, "sources": list(best.values())}
 
 
+_llm: ChatGroq | None = None
+
+
 def get_llm() -> ChatGroq:
-    """Return a configured ChatGroq instance."""
-    return ChatGroq(
-        model=os.getenv("LLM_MODEL"),
-        temperature=0,
-        streaming=True,
-    )
+    """Return the shared ChatGroq instance, creating it on first call."""
+    global _llm
+    if _llm is None:
+        _llm = ChatGroq(model=os.getenv("LLM_MODEL"), temperature=0, streaming=True)
+    return _llm
 
 
 def generate_answer(state: VideoAnalysisState) -> dict:
-    """LangGraph node: compare both videos and produce the final answer."""
+    """LangGraph node: generate an answer from the retrieved context."""
     llm = get_llm()
 
     context_blocks = "\n\n".join(
         f"--- Video {i + 1} ---\n{ctx}" for i, ctx in enumerate(state["contexts"])
     )
     system_content = (
-        "You are a social media analyst comparing YouTube videos.\n"
-        "Use only the context provided below to answer the question.\n"
-        "Be specific and cite evidence from the transcripts.\n\n"
+        "You are a social media video analyst. Answer the user's question using only "
+        "the context provided below.\n\n"
+        "Context structure: each numbered section covers one video. It includes the "
+        "video title, creator, engagement rate (likes + comments as a share of views), "
+        "and relevant transcript excerpts. If a section starts with [no transcript], "
+        "that video had no captions — the content shown is built from its title, "
+        "description, and tags instead.\n\n"
+        "Rules:\n"
+        "- Use only information from the context. Do not use outside knowledge about "
+        "these videos, creators, or topics.\n"
+        "- If a video is marked [no transcript], say so when discussing its content. "
+        "Your understanding of what that video covers is limited to its metadata.\n"
+        "- For comparison questions, address each video. If a video's context is "
+        "empty or missing, say that rather than skipping it silently.\n"
+        "- Back up your points with specific details from the transcripts: direct "
+        "quotes, stats, or concrete examples.\n"
+        "- If the context does not contain enough information to answer, say so "
+        "clearly. Do not guess.\n"
+        "- Be direct and concise. No filler, no restating the question.\n\n"
         + context_blocks
     )
 

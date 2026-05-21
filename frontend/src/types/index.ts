@@ -11,6 +11,7 @@ export interface VideoMetadata {
   thumbnail_url: string;
   engagement_rate: number;
   subscriber_count: number | null;
+  source_url: string;
 }
 
 export interface ChatMessage {

@@ -1,15 +1,15 @@
 # Video RAG Chatbot
 
-A chatbot that takes YouTube video URLs and lets you compare them through conversation. You ask a question, it finds the relevant parts of each transcript and uses an LLM to answer based on what it actually found.
+A chatbot that takes video URLs (YouTube, Instagram, Facebook) and lets you compare them through conversation. You ask a question, it finds the relevant parts of each transcript and uses an LLM to answer based on what it actually found.
 
 Built with FastAPI on the backend, Next.js on the frontend, and LangGraph to handle the retrieval and generation steps. 
 
 ## Status
-🔨 In development
+Working. Backend and frontend are connected, end-to-end flow runs.
 
 ## Notebooks
 
-These are the building blocks I prototyped before wiring everything together. Each one was a checkpoint to make sure that piece actually worked.
+These were the building blocks before wiring everything together. Each one was a checkpoint to make sure that piece actually worked before porting it to the backend.
 
 **transcript_experiments.ipynb**
 Pulls raw transcripts from YouTube using `youtube_transcript_api`. Handles different URL formats and cleans up the text. Tested on a few real videos and it works clean.
@@ -21,7 +21,7 @@ Fetches real stats from the YouTube Data API: views, likes, comments, duration a
 Splits transcripts into overlapping chunks and embeds them into ChromaDB using Gemini. Got the Veritasium video stored at chunks and semantic search is returning the right results.
 
 **rag_pipeline_prototype.ipynb**
-The full RAG pipeline with LangGraph. Two retrieval nodes pull context for each video separately, then Groq's Llama model generates the comparison. Follow-up questions work too since chat history lives in the state.
+The full RAG pipeline with LangGraph. A retrieval node queries ChromaDB for each video in parallel, then a generation node builds the comparison using Groq's Llama model. Follow-up questions work too since chat history lives in the graph state.
 
 ## Running
 
@@ -39,15 +39,17 @@ cd frontend && npm install && npm run dev
 
 Backend docs at `http://localhost:8000/docs`, frontend at `http://localhost:3000`.
 
-Add keys in `.env` file in the project root:
+Add keys in `.env` file in the project root (copy from `.env.example`).
 
 ## How it works
 
-You paste YouTube URLs and hit analyze. The backend fetches the transcript via `youtube_transcript_api` and pulls stats (views, likes, comments, engagement rate) from the YouTube Data API. Both happen in parallel using a thread pool so neither one blocks the other.
+You paste video URLs and hit analyze. It works with YouTube, Instagram, and Facebook. For YouTube it fetches the transcript via `youtube_transcript_api` and pulls stats from the YouTube Data API. Both happen in parallel so neither one blocks the other.
+
+For Instagram and Facebook, yt-dlp handles both the transcript and the metadata in a single info fetch. That single call is shared between both tasks so the network request only happens once, not twice.
 
 The transcript gets split into overlapping chunks of 1000 characters with 200 character overlap, each one embedded with Gemini and stored in ChromaDB tagged with the video ID.
 
-When you ask a question, LangGraph runs two nodes in sequence. The first one queries ChromaDB separately for each video and grabs the top matching chunks. The second one builds a labeled context block per video and sends all of it to Groq's Llama model to generate the comparison. Tokens stream back over SSE so the answer starts appearing right away.
+When you ask a question, LangGraph runs two nodes in sequence. The first node queries ChromaDB for each video in parallel and grabs the top matching chunks. The second node builds a labeled context block per video and sends all of it to Groq's Llama model. Tokens stream back over SSE so the answer starts appearing straight away.
 
 Chat history is kept per session and capped at the last 10 messages so the prompt does not grow unbounded.
 
@@ -57,9 +59,11 @@ The first time you load a video, metadata comes back in the API response immedia
 
 The frontend polls `/ingest/status` every 2 seconds and shows an indexing indicator on each video card. The chat input stays disabled until all loaded videos are ready.
 
-Once a video is fetched, it gets saved to disk under `backend/video_cache`. If you load the same video again it skips the YouTube API calls entirely. For a demo this matters a lot since you are probably loading the same videos repeatedly.
+Once a video is fetched, the transcript and metadata are saved to disk under `backend/video_cache`. If you load the same video again it skips the API calls entirely and goes straight to embedding. For a demo this matters since you are probably loading the same videos more than once.
 
 After embedding finishes, the raw transcript is dropped from the cache file. The text is already stored in ChromaDB as chunks so keeping a second copy on disk is just wasted space. The cache file only holds the metadata after that point.
+
+The cache keeps up to 20 videos on disk. Older ones get evicted automatically when that limit is hit.
 
 ## Retrieval
 
@@ -67,9 +71,19 @@ All video chunks live in a single ChromaDB collection. Each chunk has the video 
 
 The source shown in the chat is the chunk that was closest to your question for each video, picked by distance score.
 
+If a video has no subtitles at all, the system builds a fallback from the title, description, and tags and marks it as `[no transcript]` in the context. The LLM is told to flag this when discussing that video so the answer is honest about the limitation.
+
+## Embedding rate limits
+
+Gemini's free tier has a per-minute quota. To avoid hitting it when multiple videos are indexing at the same time, embedding calls are serialized through a lock. Only one video embeds at a time. Each batch also retries up to 3 times on a 429, waiting however long the API says to wait before trying again.
+
+## Sessions
+
+Chat history is saved to `localStorage` so past conversations show up in the sidebar. Resuming a session reloads the video metadata from the stored data and re-ingests the videos in the background so you can pick up where you left off without starting from scratch.
+
 ## Monitoring
 
-The `/benchmark` endpoint returns hardware info, network latency probes to the external APIs (Groq, Gemini, YouTube), and a history of recent operations with timing and memory delta. Each operation gets an efficiency score based on how fast it ran vs how loaded the machine was at that moment. Useful for figuring out whether something is slow because of the code or because the server was already busy.
+The `/benchmark` endpoint returns hardware info, network latency probes to the external APIs (Groq, Gemini, YouTube), and a log of recent operations with timing and memory usage. Each operation gets a score based on how fast it ran relative to how loaded the machine was. Useful for telling whether something is slow because of the code or because the host was already busy.
 
 Prometheus metrics are exposed at `/metrics`.
 
@@ -95,5 +109,6 @@ Prometheus metrics are exposed at `/metrics`.
 - Backend: FastAPI (Python 3.11)
 - Orchestration: LangGraph
 - Embeddings: Gemini gemini-embedding-001
-- Vector DB: ChromaDB (local)
+- Vector DB: ChromaDB (local persistent)
 - LLM: Groq, Llama-3.3-70b-versatile
+- Media extraction: yt-dlp (Instagram, Facebook, YouTube fallback)

@@ -5,8 +5,10 @@ import logging
 import tempfile
 
 from dotenv import load_dotenv
+from requests.exceptions import ConnectionError as RequestsConnectionError
+from requests.exceptions import ProxyError as RequestsProxyError
 from youtube_transcript_api import YouTubeTranscriptApi
-from youtube_transcript_api.proxies import GenericProxyConfig
+from youtube_transcript_api.proxies import GenericProxyConfig, WebshareProxyConfig
 from youtube_transcript_api._errors import (
     TranscriptsDisabled,
     NoTranscriptFound,
@@ -28,10 +30,24 @@ _yt_proxy = os.getenv("YT_PROXY")
 
 
 def _yt_api() -> YouTubeTranscriptApi:
-    """Return a YouTubeTranscriptApi instance, using a proxy if YT_PROXY is set."""
-    if _yt_proxy:
-        return YouTubeTranscriptApi(proxy_config=GenericProxyConfig(http_url=_yt_proxy, https_url=_yt_proxy))
-    return YouTubeTranscriptApi()
+    """Return a YouTubeTranscriptApi instance with proxy if YT_PROXY is set.
+
+    Webshare URLs (p.webshare.io) are routed through WebshareProxyConfig so that
+    prevent_keeping_connections_alive is set. Without it the requests Session reuses
+    the same TCP connection and the rotating proxy never actually rotates IPs.
+    """
+    if not _yt_proxy:
+        return YouTubeTranscriptApi()
+    from urllib.parse import urlparse
+    parsed = urlparse(_yt_proxy)
+    if "webshare.io" in (parsed.hostname or ""):
+        return YouTubeTranscriptApi(
+            proxy_config=WebshareProxyConfig(
+                proxy_username=parsed.username or "",
+                proxy_password=parsed.password or "",
+            )
+        )
+    return YouTubeTranscriptApi(proxy_config=GenericProxyConfig(http_url=_yt_proxy, https_url=_yt_proxy))
 
 _url_patterns = [
     # YouTube - exactly 11 chars; lookahead stops it matching Facebook's longer numeric IDs

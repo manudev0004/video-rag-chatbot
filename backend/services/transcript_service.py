@@ -6,6 +6,7 @@ import tempfile
 
 from dotenv import load_dotenv
 from youtube_transcript_api import YouTubeTranscriptApi
+from youtube_transcript_api.proxies import GenericProxyConfig
 from youtube_transcript_api._errors import (
     TranscriptsDisabled,
     NoTranscriptFound,
@@ -13,6 +14,7 @@ from youtube_transcript_api._errors import (
     VideoUnavailable,
     AgeRestricted,
     IpBlocked,
+    RequestBlocked,
 )
 
 from ..monitoring import track
@@ -28,7 +30,7 @@ _yt_proxy = os.getenv("YT_PROXY")
 def _yt_api() -> YouTubeTranscriptApi:
     """Return a YouTubeTranscriptApi instance, using a proxy if YT_PROXY is set."""
     if _yt_proxy:
-        return YouTubeTranscriptApi(proxies={"http": _yt_proxy, "https": _yt_proxy})
+        return YouTubeTranscriptApi(proxy_config=GenericProxyConfig(http_url=_yt_proxy, https_url=_yt_proxy))
     return YouTubeTranscriptApi()
 
 _url_patterns = [
@@ -221,6 +223,8 @@ def get_transcript(url: str, info: dict | None = None) -> str:
             raise RuntimeError(f"Video {video_id} is age-restricted and cannot be accessed without login.")
         except IpBlocked:
             raise RuntimeError("YouTube has blocked this IP temporarily. Try again later.")
+        except RequestBlocked:
+            raise RuntimeError("YouTube blocked this request. Try again later or configure a proxy via YT_PROXY.")
         except NoTranscriptFound:
             # English not available; try any language the video has
             logger.info("No English transcript for %s, trying any available language", video_id)

@@ -7,6 +7,7 @@ import tempfile
 from dotenv import load_dotenv
 from requests.exceptions import ConnectionError as RequestsConnectionError
 from requests.exceptions import ProxyError as RequestsProxyError
+from requests.exceptions import RetryError as RequestsRetryError
 from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api.proxies import GenericProxyConfig, WebshareProxyConfig
 from youtube_transcript_api._errors import (
@@ -30,12 +31,7 @@ _yt_proxy = os.getenv("YT_PROXY")
 
 
 def _yt_api() -> YouTubeTranscriptApi:
-    """Return a YouTubeTranscriptApi instance with proxy if YT_PROXY is set.
-
-    Webshare URLs (p.webshare.io) are routed through WebshareProxyConfig so that
-    prevent_keeping_connections_alive is set. Without it the requests Session reuses
-    the same TCP connection and the rotating proxy never actually rotates IPs.
-    """
+    """Return a YouTubeTranscriptApi instance, with proxy if YT_PROXY is set."""
     if not _yt_proxy:
         return YouTubeTranscriptApi()
     from urllib.parse import urlparse
@@ -50,7 +46,7 @@ def _yt_api() -> YouTubeTranscriptApi:
     return YouTubeTranscriptApi(proxy_config=GenericProxyConfig(http_url=_yt_proxy, https_url=_yt_proxy))
 
 _url_patterns = [
-    # YouTube - exactly 11 chars; lookahead stops it matching Facebook's longer numeric IDs
+    # youtube IDs are exactly 11 chars; lookahead prevents matching facebook's longer numeric IDs
     r"(?:v=)([A-Za-z0-9_-]{11})(?![A-Za-z0-9_-])",
     r"youtu\.be/([A-Za-z0-9_-]{11})",
     r"(?:shorts|embed|live|v)/([A-Za-z0-9_-]{11})",
@@ -74,9 +70,23 @@ _url_patterns = [
 ]
 
 _youtube_re = re.compile(r"youtube\.com|youtu\.be")
-_QUIET_OPTS: dict = {"skip_download": True, "quiet": True, "no_warnings": True}
+_QUIET_OPTS: dict = {
+    "skip_download": True,
+    "quiet": True,
+    "no_warnings": True,
+    "extractor_args": {"youtube": {"player_client": ["tv_embedded", "ios"]}},
+}
 if _yt_proxy:
     _QUIET_OPTS["proxy"] = _yt_proxy
+
+_instagram_cookies = os.getenv("INSTAGRAM_COOKIES")
+_cookie_file: str | None = None
+
+if _instagram_cookies:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as _f:
+        _f.write(_instagram_cookies)
+        _cookie_file = _f.name
+    logger.info("Instagram cookies loaded from env")
 
 
 def extract_video_id(url: str) -> str:
@@ -93,11 +103,19 @@ def is_youtube_url(url: str) -> bool:
     return bool(_youtube_re.search(url))
 
 
+def _ydlp_opts() -> dict:
+    """Base yt-dlp options, with cookie file injected if available."""
+    opts = dict(_QUIET_OPTS)
+    if _cookie_file:
+        opts["cookiefile"] = _cookie_file
+    return opts
+
+
 def fetch_ydlp_info(url: str) -> dict:
-    """Run yt-dlp extract_info once and return the info dict. Raises RuntimeError on failure."""
+    """Pull video info with yt-dlp, no download."""
     import yt_dlp
     from yt_dlp.utils import DownloadError
-    with yt_dlp.YoutubeDL(_QUIET_OPTS) as ydl:
+    with yt_dlp.YoutubeDL(_ydlp_opts()) as ydl:
         try:
             return ydl.extract_info(url, download=False)
         except DownloadError as exc:
@@ -122,13 +140,29 @@ def _parse_vtt(path: str) -> str:
             if cleaned:
                 lines.append(cleaned)
 
-    # Auto-captions repeat lines; deduplicate consecutive dupes
+    # auto captions repeat a lot, strip consecutive dupes
     deduped: list[str] = []
     for line in lines:
         if not deduped or line != deduped[-1]:
             deduped.append(line)
 
     return " ".join(deduped)
+
+
+def _get_media_url(info: dict) -> str | None:
+    """Return a direct playable URL from yt-dlp info, for sending to AssemblyAI."""
+    if info.get("url"):
+        return info["url"]
+    formats = info.get("formats") or []
+    # prefer a format that has audio; work backwards from best quality
+    for fmt in reversed(formats):
+        if fmt.get("url") and fmt.get("acodec") != "none":
+            return fmt["url"]
+    # fallback: any format with a URL
+    for fmt in reversed(formats):
+        if fmt.get("url"):
+            return fmt["url"]
+    return None
 
 
 def _fallback_from_metadata(info: dict, url: str) -> str:
@@ -149,31 +183,34 @@ def _fallback_from_metadata(info: dict, url: str) -> str:
 
 
 def _fetch_via_ytdlp(url: str, info: dict | None = None) -> str:
-    """Fetch subtitles via yt-dlp. Supports YouTube, YouTube Shorts, Instagram, Facebook."""
+    """Get subtitles via yt-dlp. Used for Instagram and Facebook."""
     import yt_dlp
     from yt_dlp.utils import DownloadError
 
-    # Step 1: find out what subtitle languages are actually available
     if info is None:
-        with yt_dlp.YoutubeDL(_QUIET_OPTS) as ydl:
+        with yt_dlp.YoutubeDL(_ydlp_opts()) as ydl:
             info = ydl.extract_info(url, download=False)
 
     manual_subs: dict = info.get("subtitles") or {}
     auto_subs: dict = info.get("automatic_captions") or {}
 
-    # Prefer English; otherwise take the first available language
+    # prefer english, fall back to whatever is available
     chosen = next((lang for lang in _ENGLISH_LANGS if lang in manual_subs or lang in auto_subs), None)
     if chosen is None:
         chosen = next(iter(manual_subs), next(iter(auto_subs), None))
     if chosen is None:
+        # no captions - try to transcribe the audio via AssemblyAI
+        media_url = _get_media_url(info)
+        if media_url:
+            logger.info("No subtitles found, sending audio to AssemblyAI for %s", url)
+            return _fetch_via_assemblyai(media_url)
         return _fallback_from_metadata(info, url)
 
     logger.info("Downloading subtitles in lang=%s via yt-dlp", chosen)
 
-    # Step 2: download only that language; no translation fallback, no 429
     with tempfile.TemporaryDirectory() as tmpdir:
         ydl_opts = {
-            **_QUIET_OPTS,
+            **_ydlp_opts(),
             "writesubtitles": chosen in manual_subs,
             "writeautomaticsub": chosen in auto_subs,
             "subtitleslangs": [chosen],
@@ -200,6 +237,29 @@ def _fetch_via_ytdlp(url: str, info: dict | None = None) -> str:
     return transcript
 
 
+def _fetch_via_assemblyai(url: str) -> str:
+    """Transcribe via AssemblyAI. Passes the URL directly; AssemblyAI handles the download."""
+    import assemblyai as aai
+
+    api_key = os.getenv("ASSEMBLYAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("ASSEMBLYAI_API_KEY is not set in .env")
+
+    aai.settings.api_key = api_key
+    config = aai.TranscriptionConfig(speech_models=["universal-3-pro"])
+    transcriber = aai.Transcriber(config=config)
+
+    logger.info("Submitting to AssemblyAI: %s", url)
+    transcript = transcriber.transcribe(url)
+
+    if transcript.status == aai.TranscriptStatus.error:
+        raise RuntimeError(f"AssemblyAI transcription failed: {transcript.error}")
+
+    text = transcript.text or ""
+    logger.info("AssemblyAI transcript received: %d chars", len(text))
+    return text
+
+
 def _fetch_any_transcript(api: YouTubeTranscriptApi, video_id: str) -> str:
     """Try to fetch any available transcript when the preferred language isn't found."""
     tlist = api.list(video_id)
@@ -218,12 +278,10 @@ def _fetch_any_transcript(api: YouTubeTranscriptApi, video_id: str) -> str:
 
 @track("transcript_fetch")
 def get_transcript(url: str, info: dict | None = None) -> str:
-    """Fetch the full transcript for a video URL as plain text.
+    """Get transcript text for a video URL.
 
-    For YouTube: tries youtube-transcript-api (English first, then any language),
-    falls back to yt-dlp on persistent failure.
-    For Instagram and Facebook: uses yt-dlp directly.
-    Pass info to skip the yt-dlp extract_info network call when already fetched.
+    YouTube: tries youtube-transcript-api first, falls back to AssemblyAI if blocked.
+    Instagram/Facebook: uses yt-dlp. Pass info to reuse an already-fetched yt-dlp result.
     """
     if is_youtube_url(url):
         video_id = extract_video_id(url)
@@ -240,20 +298,22 @@ def get_transcript(url: str, info: dict | None = None) -> str:
         except AgeRestricted:
             raise RuntimeError(f"Video {video_id} is age-restricted and cannot be accessed without login.")
         except (IpBlocked, RequestBlocked) as exc:
-            logger.warning("Transcript API blocked for %s (%s), falling back to yt-dlp", video_id, exc)
-        except (RequestsProxyError, RequestsConnectionError) as exc:
-            logger.warning("Proxy/connection error for %s (%s), falling back to yt-dlp", video_id, exc)
+            logger.warning("Transcript API blocked for %s (%s), falling back to AssemblyAI", video_id, exc)
+        except (RequestsProxyError, RequestsConnectionError, RequestsRetryError) as exc:
+            logger.warning("Proxy/connection error for %s (%s), falling back to AssemblyAI", video_id, exc)
         except NoTranscriptFound:
-            # English not available; try any language the video has
             logger.info("No English transcript for %s, trying any available language", video_id)
             try:
                 return _fetch_any_transcript(api, video_id)
             except RuntimeError:
                 raise
             except Exception as exc:
-                logger.warning("Any-language fetch failed (%s), falling back to yt-dlp", exc)
+                logger.warning("Any-language fetch failed (%s), falling back to AssemblyAI", exc)
         except (TranscriptsDisabled, CouldNotRetrieveTranscript) as exc:
-            logger.warning("youtube-transcript-api failed (%s), falling back to yt-dlp", exc)
+            logger.warning("youtube-transcript-api failed (%s), falling back to AssemblyAI", exc)
+
+        # captions failed or blocked, hand off to assemblyai
+        return _fetch_via_assemblyai(url)
 
     logger.info("Fetching transcript via yt-dlp: %s", url)
     try:

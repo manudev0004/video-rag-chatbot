@@ -12,8 +12,7 @@ MAX_CACHED = 20
 
 _lock = threading.Lock()
 
-# in-memory index loaded from index.json at startup
-# format: {video_id: {title, cached_at, embedded}}
+# loaded from index.json on startup, keeps {video_id: {title, cached_at, embedded}}
 _index: dict[str, dict] = {}
 
 
@@ -26,7 +25,7 @@ def _video_path(video_id: str) -> Path:
 
 
 def _load_index() -> None:
-    """Read index.json into _index. Called once at module import."""
+    """Load the index from disk into memory."""
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     path = _index_path()
     if path.exists():
@@ -38,12 +37,12 @@ def _load_index() -> None:
 
 
 def _save_index() -> None:
-    """Write _index to index.json. Must be called with _lock held."""
+    """Write index to disk. Call with _lock held."""
     _index_path().write_text(json.dumps(_index, indent=2))
 
 
 def _evict_oldest() -> None:
-    """Remove the oldest entries until we are at or below MAX_CACHED. Must be called with _lock held."""
+    """Drop oldest entries when over the limit. Call with _lock held."""
     if len(_index) <= MAX_CACHED:
         return
     by_age = sorted(_index.items(), key=lambda kv: kv[1].get("cached_at", 0))
@@ -72,6 +71,34 @@ def save(video_id: str, metadata: dict, transcript: str) -> None:
     logger.info("Cached video_id=%s", video_id)
 
 
+def save_metadata_only(video_id: str, metadata: dict) -> None:
+    """Save just the metadata. Transcript gets added later via save_transcript."""
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    _video_path(video_id).write_text(json.dumps({"metadata": metadata}))
+    with _lock:
+        _index[video_id] = {
+            "title": metadata.get("title", ""),
+            "cached_at": int(time.time()),
+            "embedded": False,
+        }
+        _evict_oldest()
+        _save_index()
+    logger.info("Cached metadata-only for video_id=%s", video_id)
+
+
+def save_transcript(video_id: str, transcript: str) -> None:
+    """Add transcript to an existing cache entry."""
+    path = _video_path(video_id)
+    try:
+        data = json.loads(path.read_text()) if path.exists() else {}
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning("Could not read cache for %s to add transcript: %s", video_id, exc)
+        data = {}
+    data["transcript"] = transcript
+    path.write_text(json.dumps(data))
+    logger.info("Saved transcript for video_id=%s (%d chars)", video_id, len(transcript))
+
+
 def load(video_id: str) -> dict | None:
     """Return {metadata, transcript} for a video, or None if not cached."""
     path = _video_path(video_id)
@@ -85,7 +112,7 @@ def load(video_id: str) -> dict | None:
 
 
 def has_metadata(video_id: str) -> bool:
-    """True if this video is in the index (metadata + transcript saved)."""
+    """True if this video has been seen before (at least metadata saved)."""
     return video_id in _index
 
 
@@ -95,7 +122,7 @@ def is_embedded(video_id: str) -> bool:
 
 
 def mark_embedded(video_id: str) -> None:
-    """Record that this video's chunks have been stored in ChromaDB and drop the transcript from disk."""
+    """Mark as embedded and remove the transcript from disk to save space."""
     with _lock:
         if video_id in _index:
             _index[video_id]["embedded"] = True
@@ -112,7 +139,7 @@ def mark_embedded(video_id: str) -> None:
 
 
 def mark_failed(video_id: str) -> None:
-    """Record that embedding failed for this video so the frontend can stop polling."""
+    """Mark processing as failed so the frontend stops waiting."""
     with _lock:
         if video_id in _index:
             _index[video_id]["embed_failed"] = True

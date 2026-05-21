@@ -33,17 +33,34 @@ def reset_yt_service() -> None:
 
 def _metadata_via_ytdlp(url: str, info: dict | None = None) -> dict:
     """Extract video metadata for non-YouTube URLs using yt-dlp."""
-    import yt_dlp
+    from .transcript_service import fetch_ydlp_info
 
     if info is None:
-        ydl_opts = {"skip_download": True, "quiet": True, "no_warnings": True}
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
+        info = fetch_ydlp_info(url)
 
-    raw_views = info.get("view_count")
-    views = int(raw_views) if raw_views is not None else None
-    likes = int(info.get("like_count")) if info.get("like_count") is not None else None
-    comments = int(info.get("comment_count")) if info.get("comment_count") is not None else None
+    logger.info(
+        "yt-dlp raw stats for %s: view_count=%s plays=%s play_count=%s like_count=%s "
+        "comment_count=%s channel_follower_count=%s follower_count=%s",
+        url,
+        info.get("view_count"), info.get("plays"), info.get("play_count"),
+        info.get("like_count"), info.get("comment_count"),
+        info.get("channel_follower_count"), info.get("follower_count"),
+    )
+
+    # yt-dlp uses different field names across platforms/versions
+    def _first_int(*keys: str) -> int | None:
+        for k in keys:
+            v = info.get(k)
+            if v is not None:
+                try:
+                    return int(v)
+                except (ValueError, TypeError):
+                    pass
+        return None
+
+    views = _first_int("view_count", "plays", "play_count")
+    likes = _first_int("like_count")
+    comments = _first_int("comment_count")
 
     # Facebook doesn't expose likes via the API; parse reactions count from the title
     # e.g. "119K views · 464 reactions | Why was Queen Maeve..."
@@ -84,7 +101,7 @@ def _metadata_via_ytdlp(url: str, info: dict | None = None) -> dict:
         "hashtags": hashtags,
         "thumbnail_url": info.get("thumbnail", ""),
         "engagement_rate": engagement_rate,
-        "subscriber_count": int(info.get("channel_follower_count")) if info.get("channel_follower_count") is not None else None,
+        "subscriber_count": _first_int("channel_follower_count", "follower_count", "uploader_follower_count"),
     }
 
 

@@ -15,9 +15,8 @@ from sse_starlette.sse import EventSourceResponse
 from .models.schemas import ChatRequest, ChatResponse, IngestRequest, IngestResponse, VideoMetadata
 from .monitoring import probe_host, recent_metrics, system_info
 from .services import cache_service
-from .services.ingestion_service import chunk_transcript, get_collection, reset_collection, store_chunks
+from .services.ingestion_service import chunk_transcript, get_collection, reset_collection, store_chunks, embed_query
 from .services.metadata_service import get_video_metadata, reset_yt_service
-from .services.ingestion_service import embed_query
 from .services.rag_service import app as rag_app, get_llm, retrieve_context
 from .services.transcript_service import extract_video_id, fetch_ydlp_info, get_transcript, is_youtube_url
 
@@ -64,8 +63,20 @@ def _normalize_url(url: str) -> str:
     return url
 
 
+def _transcribe_and_embed_video(video_id: str, url: str) -> None:
+    """Fetch the transcript then embed. Runs in the background after metadata is returned."""
+    try:
+        transcript = get_transcript(url)
+    except Exception as exc:
+        logger.error("Transcript fetch failed for video_id=%s: %s", video_id, exc)
+        cache_service.mark_failed(video_id)
+        return
+    cache_service.save_transcript(video_id, transcript)
+    _embed_video(video_id)
+
+
 def _embed_video(video_id: str) -> None:
-    """Background task: chunk and embed a video that is already cached."""
+    """Chunk the transcript and store embeddings in ChromaDB."""
     entry = cache_service.load(video_id)
     if not entry:
         logger.warning("Background embed: no cache entry for video_id=%s", video_id)
@@ -88,11 +99,7 @@ def _embed_video(video_id: str) -> None:
 def _process_one_url(
     raw_url: str, bg: BackgroundTasks
 ) -> tuple[str, str | None, dict | None, str | None]:
-    """Fetch transcript and metadata for one URL and schedule background embedding.
-
-    Returns (original_url, video_id, metadata, error). On failure the last
-    element is an error message and the middle two are None.
-    """
+    """Handle one URL. Returns (original_url, video_id, metadata, error)."""
     url = _normalize_url(raw_url)
     try:
         video_id = extract_video_id(url)
@@ -112,30 +119,42 @@ def _process_one_url(
             if not col.get(where={"video_id": video_id}, limit=1, include=[])["ids"]:
                 already_embedded = False
         if not already_embedded:
-            bg.add_task(_embed_video, video_id)
+            if entry.get("transcript"):
+                bg.add_task(_embed_video, video_id)
+            else:
+                bg.add_task(_transcribe_and_embed_video, video_id, url)
     else:
-        # For non-YouTube URLs both transcript and metadata need extract_info.
-        # Fetch once here and pass it to both so the network call only happens once.
-        info = None
-        if not is_youtube_url(url):
+        if is_youtube_url(url):
+            # metadata is quick (YouTube API), transcript can take a while (AssemblyAI)
+            # so we return metadata straight away and do the rest in the background
+            try:
+                metadata = get_video_metadata(url)
+            except (ValueError, RuntimeError, OSError) as exc:
+                return raw_url, None, None, str(exc)
+            if metadata.get("video_id") and metadata["video_id"] != video_id:
+                video_id = metadata["video_id"]
+            metadata["source_url"] = url
+            cache_service.save_metadata_only(video_id, metadata)
+            bg.add_task(_transcribe_and_embed_video, video_id, url)
+        else:
+            # for instagram/facebook yt-dlp handles both, reuse the same extract_info call
             try:
                 info = fetch_ydlp_info(url)
             except RuntimeError as exc:
                 return raw_url, None, None, str(exc)
-        try:
-            with ThreadPoolExecutor(max_workers=2) as pool:
-                transcript_fut = pool.submit(get_transcript, url, info)
-                metadata_fut = pool.submit(get_video_metadata, url, info)
-                transcript = transcript_fut.result()
-                metadata = metadata_fut.result()
-        except (ValueError, RuntimeError, OSError) as exc:
-            return raw_url, None, None, str(exc)
-        # share/redirect URLs resolve to a different ID than what we extract from the URL
-        if metadata.get("video_id") and metadata["video_id"] != video_id:
-            video_id = metadata["video_id"]
-        metadata["source_url"] = url
-        cache_service.save(video_id, metadata, transcript)
-        bg.add_task(_embed_video, video_id)
+            try:
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    transcript_fut = pool.submit(get_transcript, url, info)
+                    metadata_fut = pool.submit(get_video_metadata, url, info)
+                    transcript = transcript_fut.result()
+                    metadata = metadata_fut.result()
+            except (ValueError, RuntimeError, OSError) as exc:
+                return raw_url, None, None, str(exc)
+            if metadata.get("video_id") and metadata["video_id"] != video_id:
+                video_id = metadata["video_id"]
+            metadata["source_url"] = url
+            cache_service.save(video_id, metadata, transcript)
+            bg.add_task(_embed_video, video_id)
 
     return raw_url, video_id, metadata, None
 
@@ -143,11 +162,10 @@ def _process_one_url(
 def _process_one_url_safe(
     raw_url: str, bg: BackgroundTasks
 ) -> tuple[str, str | None, dict | None, str | None]:
-    """One silent retry on unexpected exceptions; frontend only sees the final outcome."""
+    """Thin wrapper that retries once on unexpected failures."""
     try:
         return _process_one_url(raw_url, bg)
     except Exception as exc:
-        # transient failure, retry once
         logger.warning("Retrying %s: %s", raw_url, exc)
     try:
         return _process_one_url(raw_url, bg)

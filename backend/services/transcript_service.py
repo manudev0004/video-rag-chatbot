@@ -22,6 +22,15 @@ logger = logging.getLogger(__name__)
 
 _ENGLISH_LANGS = ["en", "en-US", "en-GB", "en-orig"]
 
+_yt_proxy = os.getenv("YT_PROXY")
+
+
+def _yt_api() -> YouTubeTranscriptApi:
+    """Return a YouTubeTranscriptApi instance, using a proxy if YT_PROXY is set."""
+    if _yt_proxy:
+        return YouTubeTranscriptApi(proxies={"http": _yt_proxy, "https": _yt_proxy})
+    return YouTubeTranscriptApi()
+
 _url_patterns = [
     # YouTube - exactly 11 chars; lookahead stops it matching Facebook's longer numeric IDs
     r"(?:v=)([A-Za-z0-9_-]{11})(?![A-Za-z0-9_-])",
@@ -199,7 +208,7 @@ def get_transcript(url: str, info: dict | None = None) -> str:
     if is_youtube_url(url):
         video_id = extract_video_id(url)
         logger.info("Fetching transcript for video_id=%s", video_id)
-        api = YouTubeTranscriptApi()
+        api = _yt_api()
         try:
             fetched = api.fetch(video_id)
             parts = [snippet.text.replace("\n", " ").strip() for snippet in fetched]

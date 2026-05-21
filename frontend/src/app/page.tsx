@@ -117,7 +117,7 @@ export default function Page() {
         return next;
       });
       if (Object.keys(result.errors).length > 0) {
-        const lines = Object.entries(result.errors).map(([u, msg]) => `${u}: ${msg}`);
+        const lines = Object.values(result.errors);
         setError(lines.join("\n"));
       }
     } catch (err) {
@@ -282,13 +282,17 @@ export default function Page() {
   return (
     <div className="flex h-screen flex-col overflow-hidden bg-zinc-50">
       {error && (
-        <div className="flex items-center justify-between gap-4 border-b border-red-200 bg-red-50 px-4 py-2.5 text-sm text-red-700">
-          <span>{error}</span>
+        <div className="flex items-start justify-between gap-3 border-b border-red-200 bg-red-50 px-4 py-2.5 text-sm text-red-700">
+          <ul className="max-h-[72px] overflow-y-auto space-y-0.5 py-0.5 min-w-0">
+            {error.split("\n").map((line, i) => (
+              <li key={i} className="truncate" title={line}>{line}</li>
+            ))}
+          </ul>
           <button
             type="button"
             onClick={() => setError(null)}
             aria-label="Dismiss error"
-            className="shrink-0 rounded p-0.5 transition-colors hover:bg-red-100"
+            className="mt-0.5 shrink-0 rounded p-0.5 transition-colors hover:bg-red-100"
           >
             <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
               <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />

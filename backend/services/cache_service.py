@@ -99,6 +99,7 @@ def mark_embedded(video_id: str) -> None:
     with _lock:
         if video_id in _index:
             _index[video_id]["embedded"] = True
+            _index[video_id].pop("embed_failed", None)
             _save_index()
     path = _video_path(video_id)
     if path.exists():
@@ -108,6 +109,19 @@ def mark_embedded(video_id: str) -> None:
                 path.write_text(json.dumps({"metadata": data["metadata"]}))
         except (json.JSONDecodeError, OSError) as exc:
             logger.warning("Could not strip transcript for %s: %s", video_id, exc)
+
+
+def mark_failed(video_id: str) -> None:
+    """Record that embedding failed for this video so the frontend can stop polling."""
+    with _lock:
+        if video_id in _index:
+            _index[video_id]["embed_failed"] = True
+            _save_index()
+
+
+def is_failed(video_id: str) -> bool:
+    """True if the last embed attempt for this video failed."""
+    return _index.get(video_id, {}).get("embed_failed", False)
 
 
 def delete(video_id: str) -> None:

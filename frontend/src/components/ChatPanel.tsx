@@ -3,7 +3,7 @@
 import { useState, useRef, useEffect, useCallback, KeyboardEvent } from "react";
 import Markdown from "react-markdown";
 import type { Components } from "react-markdown";
-import type { ChatMessage } from "@/types";
+import type { ChatMessage, SourceChunk } from "@/types";
 
 const mdComponents: Components = {
   p: ({ children }) => <p className="mb-2 last:mb-0">{children}</p>,
@@ -43,22 +43,22 @@ const multiVideoSuggestions = [
   "Summarize the key takeaways across all the videos.",
 ];
 
-function SourceList({ sources }: { sources: Array<Record<string, unknown>> }) {
+function SourceList({ sources }: { sources: SourceChunk[] }) {
   if (sources.length === 0) return null;
   return (
-    <div className="mt-2 flex flex-wrap gap-1">
-      {sources.map((src, i) => {
-        const label = typeof src.title === "string" ? src.title : `Source ${i + 1}`;
-        return (
-          <span
-            key={i}
-            className="max-w-[200px] truncate rounded-full bg-zinc-100 px-2 py-0.5 text-xs text-zinc-500"
-            title={label}
-          >
-            {label}
+    <div className="mt-2 flex flex-wrap gap-1.5">
+      {sources.map((chunk, i) => (
+        <div
+          key={i}
+          title={chunk.preview}
+          className="flex flex-col rounded-md border border-zinc-200 bg-zinc-50 px-2.5 py-1.5 text-xs text-zinc-600"
+        >
+          <span className="max-w-[220px] truncate font-medium text-zinc-800">{chunk.title}</span>
+          <span className="text-zinc-400">
+            {chunk.creator} &middot; chunk {chunk.chunk_index + 1}/{chunk.total_chunks}
           </span>
-        );
-      })}
+        </div>
+      ))}
     </div>
   );
 }
@@ -197,7 +197,7 @@ export default function ChatPanel({ messages, onSend, onNewChat, disabled, isLoa
       </div>
 
       <div className="border-t border-zinc-200 px-4 py-3">
-        <div className="flex items-end gap-2">
+        <div className="flex items-center gap-2">
           <textarea
             rows={1}
             value={input}

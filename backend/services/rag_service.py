@@ -48,7 +48,10 @@ def retrieve_context(video_id: str, query_embedding: list[float], k: int = 4) ->
         {
             "video_id": chunk["metadata"]["video_id"],
             "title": chunk["metadata"]["title"],
+            "creator": chunk["metadata"]["creator"],
             "chunk_index": chunk["metadata"]["chunk_index"],
+            "total_chunks": chunk["metadata"]["total_chunks"],
+            "preview": chunk["text"][:150].rstrip(),
             "distance": round(chunk["distance"], 4),
         }
         for chunk in matched_chunks
@@ -71,14 +74,15 @@ def retrieve_contexts(state: VideoAnalysisState) -> dict:
             contexts.append(context)
             sources.extend(video_sources)
 
-    # one source entry per video, keep the closest chunk
-    best: dict[str, dict] = {}
+    seen: set[tuple[str, int]] = set()
+    deduped: list[dict] = []
     for s in sources:
-        vid = s["video_id"]
-        if vid not in best or s["distance"] < best[vid]["distance"]:
-            best[vid] = s
+        key = (s["video_id"], s["chunk_index"])
+        if key not in seen:
+            seen.add(key)
+            deduped.append(s)
 
-    return {"contexts": contexts, "sources": list(best.values())}
+    return {"contexts": contexts, "sources": deduped}
 
 
 _llm: ChatGroq | None = None

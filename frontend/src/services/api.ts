@@ -1,4 +1,4 @@
-import type { IngestResponse, VideoMetadata } from "@/types";
+import type { IngestResponse, VideoMetadata, SourceChunk } from "@/types";
 
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
@@ -54,7 +54,7 @@ export async function streamChat(
   sessionId: string,
   videoIds: string[],
   onToken: (token: string) => void,
-  onSources: (sources: Array<Record<string, unknown>>) => void,
+  onSources: (sources: SourceChunk[]) => void,
   onDone: () => void
 ): Promise<void> {
   const res = await fetch(`${BASE_URL}/chat/stream`, {
@@ -95,7 +95,7 @@ export async function streamChat(
     if (type === "token" && data) onToken(data);
     else if (type === "sources" && data) {
       try {
-        onSources(JSON.parse(data) as Array<Record<string, unknown>>);
+        onSources(JSON.parse(data) as SourceChunk[]);
       } catch { /* skip bad payload */ }
     }
     return false;

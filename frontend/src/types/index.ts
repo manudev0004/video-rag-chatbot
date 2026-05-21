@@ -14,10 +14,20 @@ export interface VideoMetadata {
   source_url: string;
 }
 
+export interface SourceChunk {
+  video_id: string;
+  title: string;
+  creator: string;
+  chunk_index: number;
+  total_chunks: number;
+  preview: string;
+  distance: number;
+}
+
 export interface ChatMessage {
   role: "user" | "assistant";
   content: string;
-  sources?: Array<Record<string, unknown>>;
+  sources?: SourceChunk[];
   isStreaming?: boolean;
 }
 

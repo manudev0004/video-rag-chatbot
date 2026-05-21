@@ -233,13 +233,13 @@ async def chat_stream(request: ChatRequest) -> EventSourceResponse:
             all_contexts.append(context)
             raw_sources.extend(sources)
 
-    # one source entry per video, keep the chunk closest to the query
-    best: dict[str, dict] = {}
+    seen: set[tuple[str, int]] = set()
+    all_sources: list[dict] = []
     for s in raw_sources:
-        vid = s["video_id"]
-        if vid not in best or s["distance"] < best[vid]["distance"]:
-            best[vid] = s
-    all_sources = list(best.values())
+        key = (s["video_id"], s["chunk_index"])
+        if key not in seen:
+            seen.add(key)
+            all_sources.append(s)
 
     context_blocks = "\n\n".join(
         f"--- Video {i + 1} ---\n{ctx}" for i, ctx in enumerate(all_contexts)

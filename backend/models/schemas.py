@@ -33,6 +33,7 @@ class VideoMetadata(BaseModel):
     thumbnail_url: str
     engagement_rate: float
     subscriber_count: int | None
+    source_url: str = ""
 
 
 class IngestResponse(BaseModel):

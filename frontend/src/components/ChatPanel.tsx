@@ -36,11 +36,11 @@ const singleVideoSuggestions = [
   "Who is the target audience for this video?",
 ];
 
-const twoVideoSuggestions = [
+const multiVideoSuggestions = [
   "What is each video mainly about?",
-  "How do the two videos differ in tone and style?",
+  "How do the videos differ in tone and style?",
   "Which video has better audience engagement and why?",
-  "Summarize the key takeaways from both videos.",
+  "Summarize the key takeaways across all the videos.",
 ];
 
 function SourceList({ sources }: { sources: Array<Record<string, unknown>> }) {
@@ -80,7 +80,7 @@ function StreamingDots() {
 export default function ChatPanel({ messages, onSend, onNewChat, disabled, isLoading, videoCount }: ChatPanelProps) {
   const [input, setInput] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
-  const suggestions = videoCount >= 2 ? twoVideoSuggestions : singleVideoSuggestions;
+  const suggestions = videoCount >= 2 ? multiVideoSuggestions : singleVideoSuggestions;
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });

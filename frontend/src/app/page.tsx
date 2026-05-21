@@ -16,6 +16,7 @@ export default function Page() {
   const [isChatLoading, setIsChatLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [indexingIds, setIndexingIds] = useState<Set<string>>(new Set());
+  const [failedIds, setFailedIds] = useState<Set<string>>(new Set());
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<string>(() => crypto.randomUUID());
 
@@ -24,7 +25,8 @@ export default function Page() {
 
   videoDataRef.current = videoData;
 
-  const hasVideos = Object.keys(videoData).length > 0;
+  const videoCount = Object.keys(videoData).length;
+  const hasVideos = videoCount > 0;
   const isIndexing = indexingIds.size > 0;
 
   useEffect(() => {
@@ -71,20 +73,32 @@ export default function Page() {
 
   useEffect(() => {
     if (indexingIds.size === 0) return;
+    let active = true;
     const ids = [...indexingIds];
     const timer = setInterval(async () => {
       try {
         const status = await api.getIngestStatus(ids);
+        if (!active) return;
         const pending = Object.entries(status)
-          .filter(([, v]) => v !== "ready")
+          .filter(([, v]) => v === "indexing")
+          .map(([k]) => k);
+        const nowFailed = Object.entries(status)
+          .filter(([, v]) => v === "failed")
           .map(([k]) => k);
         setIndexingIds(new Set(pending));
+        if (nowFailed.length > 0) {
+          setFailedIds((prev) => new Set([...prev, ...nowFailed]));
+          setError("Embedding failed for one or more videos. You can delete and re-add them.");
+        }
         if (pending.length === 0) clearInterval(timer);
       } catch {
         // ignore poll errors, will retry on next tick
       }
     }, 2000);
-    return () => clearInterval(timer);
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
   }, [indexingIds]);
 
   const handleIngest = useCallback(async () => {
@@ -102,6 +116,10 @@ export default function Page() {
         for (const id of Object.keys(result.videos)) next.add(id);
         return next;
       });
+      if (Object.keys(result.errors).length > 0) {
+        const lines = Object.entries(result.errors).map(([u, msg]) => `${u}: ${msg}`);
+        setError(lines.join("\n"));
+      }
     } catch (err) {
       setError(
         err instanceof Error
@@ -124,6 +142,11 @@ export default function Page() {
       next.delete(videoId);
       return next;
     });
+    setFailedIds((prev) => {
+      const next = new Set(prev);
+      next.delete(videoId);
+      return next;
+    });
     api.deleteVideo(videoId).catch(() => {});
   }, []);
 
@@ -134,6 +157,7 @@ export default function Page() {
     setMessages([]);
     setVideoData({});
     setIndexingIds(new Set());
+    setFailedIds(new Set());
     setUrls([]);
     setError(null);
   }, []);
@@ -144,12 +168,15 @@ export default function Page() {
     setMessages(session.messages);
     setVideoData(session.videoData);
     setIndexingIds(new Set());
+    setFailedIds(new Set());
     setUrls([]);
     setError(null);
 
     if (session.videoIds.length === 0) return;
 
-    const videoUrls = session.videoIds.map((id) => `https://www.youtube.com/watch?v=${id}`);
+    const videoUrls = Object.values(session.videoData)
+      .map((m) => m.source_url || `https://www.youtube.com/watch?v=${m.video_id}`)
+      .filter(Boolean);
     setIsIngesting(true);
     try {
       const result = await api.ingestVideos(videoUrls);
@@ -183,6 +210,7 @@ export default function Page() {
     setMessages([]);
     setVideoData({});
     setIndexingIds(new Set());
+    setFailedIds(new Set());
     setSessions([]);
     setUrls([]);
     setError(null);
@@ -290,7 +318,7 @@ export default function Page() {
             <>
               <div className="flex shrink-0 items-center justify-between px-0.5">
                 <span className="text-xs text-zinc-400">
-                  {Object.keys(videoData).length} video{Object.keys(videoData).length !== 1 ? "s" : ""} loaded
+                  {videoCount} video{videoCount !== 1 ? "s" : ""} loaded
                 </span>
                 <button
                   type="button"
@@ -312,6 +340,7 @@ export default function Page() {
                     data={meta}
                     loading={false}
                     indexing={indexingIds.has(meta.video_id)}
+                    failed={failedIds.has(meta.video_id)}
                     onDelete={() => handleDeleteVideo(meta.video_id)}
                   />
                 ))}
@@ -338,7 +367,7 @@ export default function Page() {
             onNewChat={handleNewChat}
             disabled={!hasVideos || isChatLoading || isIndexing}
             isLoading={isChatLoading}
-            videoCount={Object.keys(videoData).length}
+            videoCount={videoCount}
           />
         </section>
       </main>

@@ -6,6 +6,7 @@ interface VideoCardProps {
   data: VideoMetadata | null;
   loading: boolean;
   indexing?: boolean;
+  failed?: boolean;
   onDelete?: () => void;
 }
 
@@ -18,7 +19,8 @@ function formatDuration(seconds: number): string {
   return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
 }
 
-function formatCount(n: number): string {
+function formatCount(n: number | null): string {
+  if (n === null || n === undefined) return "N/A";
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
   return String(n);
@@ -36,7 +38,7 @@ function Skeleton({ className }: { className: string }) {
 
 const STATS = ["Views", "Likes", "Comments"] as const;
 
-export default function VideoCard({ label, data, loading, indexing, onDelete }: VideoCardProps) {
+export default function VideoCard({ label, data, loading, indexing, failed, onDelete }: VideoCardProps) {
   return (
     <div className="relative flex h-full flex-col gap-3 rounded-xl border border-zinc-200 bg-white p-4 shadow-sm">
       {onDelete && (
@@ -89,7 +91,6 @@ export default function VideoCard({ label, data, loading, indexing, onDelete }: 
             </span>
           </div>
 
-          {/* Fixed the height so it donot changes regardless of title length */}
           <div className="shrink-0">
             <h3 className="line-clamp-2 h-9 text-sm font-semibold leading-snug text-zinc-900">
               {data.title}
@@ -97,7 +98,7 @@ export default function VideoCard({ label, data, loading, indexing, onDelete }: 
             <p className="mt-1 truncate text-xs text-zinc-500">
               {data.creator}
               <span className="mx-1 text-zinc-300">·</span>
-              {formatCount(data.subscriber_count)} subscribers
+              {data.subscriber_count !== null ? `${formatCount(data.subscriber_count)} subscribers` : "subscribers N/A"}
             </p>
           </div>
 
@@ -134,6 +135,12 @@ export default function VideoCard({ label, data, loading, indexing, onDelete }: 
             <div className="flex shrink-0 items-center gap-1.5 text-xs text-amber-600">
               <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-amber-400" />
               Indexing...
+            </div>
+          )}
+          {failed && (
+            <div className="flex shrink-0 items-center gap-1.5 text-xs text-red-600">
+              <span className="inline-block h-1.5 w-1.5 rounded-full bg-red-400" />
+              Index failed
             </div>
           )}
         </>

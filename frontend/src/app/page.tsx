@@ -111,11 +111,18 @@ export default function Page() {
     try {
       const result = await api.ingestVideos(validUrls);
       setVideoData((prev) => ({ ...prev, ...result.videos }));
-      setIndexingIds((prev) => {
-        const next = new Set(prev);
-        for (const id of Object.keys(result.videos)) next.add(id);
-        return next;
-      });
+      const returnedIds = Object.keys(result.videos);
+      if (returnedIds.length > 0) {
+        const status = await api.getIngestStatus(returnedIds);
+        const needsIndexing = returnedIds.filter((id) => status[id] === "indexing");
+        if (needsIndexing.length > 0) {
+          setIndexingIds((prev) => {
+            const next = new Set(prev);
+            for (const id of needsIndexing) next.add(id);
+            return next;
+          });
+        }
+      }
       if (Object.keys(result.errors).length > 0) {
         const lines = Object.values(result.errors);
         setError(lines.join("\n"));
@@ -181,11 +188,14 @@ export default function Page() {
     try {
       const result = await api.ingestVideos(videoUrls);
       setVideoData((prev) => ({ ...prev, ...result.videos }));
-      setIndexingIds((prev) => {
-        const next = new Set(prev);
-        for (const id of Object.keys(result.videos)) next.add(id);
-        return next;
-      });
+      const resumedIds = Object.keys(result.videos);
+      if (resumedIds.length > 0) {
+        const status = await api.getIngestStatus(resumedIds);
+        const needsIndexing = resumedIds.filter((id) => status[id] === "indexing");
+        if (needsIndexing.length > 0) {
+          setIndexingIds(new Set(needsIndexing));
+        }
+      }
     } catch (err) {
       setError(
         err instanceof Error

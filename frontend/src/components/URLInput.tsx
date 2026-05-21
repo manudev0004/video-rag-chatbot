@@ -12,11 +12,18 @@ interface URLInputProps {
 const MAX_URLS = 10;
 
 const DEMO_URLS = [
-  "https://www.youtube.com/watch?v=ksn5yrsC3Wg",
-  "https://www.youtube.com/watch?v=12DWqKQ6KHw",
   "https://youtu.be/B3m3AMRlYfc?si=z8YAE2kJR5p6GAMl",
+  "https://www.instagram.com/reel/DWF1J-bjQbW/?igsh=MWhjd2llbWJiMmNqOA==",
+  "https://youtu.be/jAHF7L_Fh9Q?si=C8uztfFSNswfkXlk",
+  "https://www.instagram.com/reel/DWF1J-bjQbW/?igsh=MWhjd2llbWJiMmNqOA==",
+  "https://youtu.be/TYhNHX372ek?si=zHy3QD8n3_VcxOPN",
+  "https://www.instagram.com/reel/DYjs1-WTqz8/?igsh=cGtkNnIybmh0OHVo",
+  "https://www.youtube.com/shorts/2bHNYVBKyA0",
+  "https://www.instagram.com/reel/DYdplZvMue8/?igsh=MWZlb3dmNzhubWtzNA==",
   "https://youtu.be/jAHF7L_Fh9Q?si=C8uztfFSNswfkXlk",
   "https://youtu.be/TYhNHX372ek?si=zHy3QD8n3_VcxOPN",
+  "https://www.youtube.com/watch?v=ksn5yrsC3Wg",
+  "https://www.youtube.com/watch?v=12DWqKQ6KHw",
 ];
 
 export default function URLInput({ urls, onChange, onSubmit, loading }: URLInputProps) {

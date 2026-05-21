@@ -1,6 +1,6 @@
 import json
 import logging
-import os
+import re
 from concurrent.futures import ThreadPoolExecutor
 
 from dotenv import load_dotenv
@@ -8,18 +8,17 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
-from langchain_groq import ChatGroq
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 from sse_starlette.sse import EventSourceResponse
 
 from .models.schemas import ChatRequest, ChatResponse, IngestRequest, IngestResponse, VideoMetadata
 from .monitoring import probe_host, recent_metrics, system_info
 from .services import cache_service
-from .services.ingestion_service import chunk_transcript, get_collection, store_chunks
-from .services.metadata_service import get_video_metadata
+from .services.ingestion_service import chunk_transcript, get_collection, reset_collection, store_chunks
+from .services.metadata_service import get_video_metadata, reset_yt_service
 from .services.ingestion_service import embed_query
-from .services.rag_service import app as rag_app, retrieve_context
-from .services.transcript_service import extract_video_id, get_transcript
+from .services.rag_service import app as rag_app, get_llm, retrieve_context
+from .services.transcript_service import extract_video_id, fetch_ydlp_info, get_transcript, is_youtube_url
 
 load_dotenv()
 
@@ -35,9 +34,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# stored in memory for now will swap for Redis in production
 video_metadata_store: dict[str, dict] = {}
 chat_histories: dict[str, list] = {}
+
+_https_re = re.compile(r"^https?://")
+_bad_scheme_re = re.compile(r"^h[a-z]*:?//")
 
 ingest_counter = Counter("ingest_requests_total", "Total ingest requests")
 chat_counter = Counter("chat_requests_total", "Total chat requests")
@@ -50,19 +51,103 @@ def health() -> dict:
     return {"status": "ok", "videos_loaded": len(video_metadata_store)}
 
 
+def _normalize_url(url: str) -> str:
+    url = url.strip()
+    if not _https_re.match(url):
+        url = _bad_scheme_re.sub("https://", url)
+    return url
+
+
 def _embed_video(video_id: str) -> None:
     """Background task: chunk and embed a video that is already cached."""
     entry = cache_service.load(video_id)
     if not entry:
         logger.warning("Background embed: no cache entry for video_id=%s", video_id)
         return
-    chunks = chunk_transcript(entry["transcript"], entry["metadata"])
+    transcript = entry.get("transcript")
+    if not transcript:
+        logger.warning("Background embed: no transcript in cache for video_id=%s", video_id)
+        cache_service.mark_failed(video_id)
+        return
+    chunks = chunk_transcript(transcript, entry["metadata"])
     try:
         store_chunks(chunks)
         cache_service.mark_embedded(video_id)
         logger.info("Background embed done for video_id=%s", video_id)
     except Exception as exc:
         logger.error("Background embed failed for video_id=%s: %s", video_id, exc)
+        cache_service.mark_failed(video_id)
+
+
+def _process_one_url(
+    raw_url: str, bg: BackgroundTasks
+) -> tuple[str, str | None, dict | None, str | None]:
+    """Fetch transcript and metadata for one URL and schedule background embedding.
+
+    Returns (original_url, video_id, metadata, error). On failure the last
+    element is an error message and the middle two are None.
+    """
+    url = _normalize_url(raw_url)
+    try:
+        video_id = extract_video_id(url)
+    except ValueError as exc:
+        return raw_url, None, None, str(exc)
+
+    if cache_service.has_metadata(video_id):
+        entry = cache_service.load(video_id)
+        if not entry:
+            return raw_url, None, None, f"Cache read failed for {video_id}"
+        metadata = entry["metadata"]
+        if not metadata.get("source_url"):
+            metadata["source_url"] = url
+        already_embedded = cache_service.is_embedded(video_id)
+        if already_embedded:
+            col = get_collection()
+            if not col.get(where={"video_id": video_id}, limit=1, include=[])["ids"]:
+                already_embedded = False
+        if not already_embedded:
+            bg.add_task(_embed_video, video_id)
+    else:
+        # For non-YouTube URLs both transcript and metadata need extract_info.
+        # Fetch once here and pass it to both so the network call only happens once.
+        info = None
+        if not is_youtube_url(url):
+            try:
+                info = fetch_ydlp_info(url)
+            except RuntimeError as exc:
+                return raw_url, None, None, str(exc)
+        try:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                transcript_fut = pool.submit(get_transcript, url, info)
+                metadata_fut = pool.submit(get_video_metadata, url, info)
+                transcript = transcript_fut.result()
+                metadata = metadata_fut.result()
+        except (ValueError, RuntimeError, OSError) as exc:
+            return raw_url, None, None, str(exc)
+        # share/redirect URLs resolve to a different ID than what we extract from the URL
+        if metadata.get("video_id") and metadata["video_id"] != video_id:
+            video_id = metadata["video_id"]
+        metadata["source_url"] = url
+        cache_service.save(video_id, metadata, transcript)
+        bg.add_task(_embed_video, video_id)
+
+    return raw_url, video_id, metadata, None
+
+
+def _process_one_url_safe(
+    raw_url: str, bg: BackgroundTasks
+) -> tuple[str, str | None, dict | None, str | None]:
+    """One silent retry on unexpected exceptions; frontend only sees the final outcome."""
+    try:
+        return _process_one_url(raw_url, bg)
+    except Exception as exc:
+        # transient failure, retry once
+        logger.warning("Retrying %s: %s", raw_url, exc)
+    try:
+        return _process_one_url(raw_url, bg)
+    except Exception as exc:
+        logger.error("Ingest failed for %s after retry: %s", raw_url, exc)
+        return raw_url, None, None, str(exc)
 
 
 @app.post("/ingest", response_model=IngestResponse)
@@ -70,44 +155,35 @@ def ingest(request: IngestRequest, bg: BackgroundTasks) -> IngestResponse:
     """Return video metadata immediately; embedding runs in the background."""
     ingest_counter.inc()
     ingested: dict[str, VideoMetadata] = {}
+    errors: dict[str, str] = {}
 
-    for url in request.urls:
-        try:
-            video_id = extract_video_id(url)
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc))
+    with ThreadPoolExecutor(max_workers=len(request.urls) or 1) as pool:
+        futures = [pool.submit(_process_one_url_safe, url, bg) for url in request.urls]
+        for fut in futures:
+            orig_url, video_id, metadata, error = fut.result()
+            if error:
+                errors[orig_url] = error
+                continue
+            video_metadata_store[video_id] = metadata
+            ingested[video_id] = VideoMetadata(**metadata)
+            logger.info("Ingest returned metadata for video_id=%s", video_id)
 
-        if cache_service.has_metadata(video_id):
-            entry = cache_service.load(video_id)
-            if not entry:
-                raise HTTPException(status_code=500, detail=f"Cache read failed for {video_id}")
-            metadata = entry["metadata"]
-            if not cache_service.is_embedded(video_id):
-                bg.add_task(_embed_video, video_id)
-        else:
-            try:
-                with ThreadPoolExecutor(max_workers=2) as pool:
-                    transcript_fut = pool.submit(get_transcript, url)
-                    metadata_fut = pool.submit(get_video_metadata, url)
-                    transcript = transcript_fut.result()
-                    metadata = metadata_fut.result()
-            except (ValueError, RuntimeError) as exc:
-                raise HTTPException(status_code=422, detail=str(exc))
-            cache_service.save(video_id, metadata, transcript)
-            bg.add_task(_embed_video, video_id)
-
-        video_metadata_store[video_id] = metadata
-        ingested[video_id] = VideoMetadata(**metadata)
-        logger.info("Ingest returned metadata for video_id=%s", video_id)
-
-    return IngestResponse(status="ok", videos=ingested)
+    return IngestResponse(status="ok", videos=ingested, errors=errors)
 
 
 @app.get("/ingest/status")
 def ingest_status(video_ids: str) -> dict:
-    """Return 'ready' or 'indexing' for each requested video_id."""
+    """Return 'ready', 'indexing', or 'failed' for each requested video_id."""
     ids = [v.strip() for v in video_ids.split(",") if v.strip()]
-    return {vid: "ready" if cache_service.is_embedded(vid) else "indexing" for vid in ids}
+    result = {}
+    for vid in ids:
+        if cache_service.is_failed(vid):
+            result[vid] = "failed"
+        elif cache_service.is_embedded(vid):
+            result[vid] = "ready"
+        else:
+            result[vid] = "indexing"
+    return result
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -150,10 +226,12 @@ async def chat_stream(request: ChatRequest) -> EventSourceResponse:
     query_embedding = embed_query(request.question)
     all_contexts: list[str] = []
     raw_sources: list[dict] = []
-    for video_id in video_ids:
-        context, sources = retrieve_context(video_id, query_embedding)
-        all_contexts.append(context)
-        raw_sources.extend(sources)
+    with ThreadPoolExecutor(max_workers=len(video_ids)) as pool:
+        futures = [pool.submit(retrieve_context, vid, query_embedding) for vid in video_ids]
+        for fut in futures:
+            context, sources = fut.result()
+            all_contexts.append(context)
+            raw_sources.extend(sources)
 
     # one source entry per video, keep the chunk closest to the query
     best: dict[str, dict] = {}
@@ -167,16 +245,32 @@ async def chat_stream(request: ChatRequest) -> EventSourceResponse:
         f"--- Video {i + 1} ---\n{ctx}" for i, ctx in enumerate(all_contexts)
     )
     system_content = (
-        "You are a social media analyst comparing YouTube videos.\n"
-        "Use only the context provided below to answer the question.\n"
-        "Be specific and cite evidence from the transcripts.\n\n"
+        "You are a social media video analyst. Answer the user's question using only "
+        "the context provided below.\n\n"
+        "Context structure: each numbered section covers one video. It includes the "
+        "video title, creator, engagement rate (likes + comments as a share of views), "
+        "and relevant transcript excerpts. If a section starts with [no transcript], "
+        "that video had no captions — the content shown is built from its title, "
+        "description, and tags instead.\n\n"
+        "Rules:\n"
+        "- Use only information from the context. Do not use outside knowledge about "
+        "these videos, creators, or topics.\n"
+        "- If a video is marked [no transcript], say so when discussing its content. "
+        "Your understanding of what that video covers is limited to its metadata.\n"
+        "- For comparison questions, address each video. If a video's context is "
+        "empty or missing, say that rather than skipping it silently.\n"
+        "- Back up your points with specific details from the transcripts: direct "
+        "quotes, stats, or concrete examples.\n"
+        "- If the context does not contain enough information to answer, say so "
+        "clearly. Do not guess.\n"
+        "- Be direct and concise. No filler, no restating the question.\n\n"
         + context_blocks
     )
     messages = [SystemMessage(content=system_content)]
     messages.extend(history)
     messages.append(HumanMessage(content=request.question))
 
-    llm = ChatGroq(model=os.getenv("LLM_MODEL"), temperature=0, streaming=True)
+    llm = get_llm()
 
     async def token_generator():
         full_answer = ""
@@ -222,10 +316,8 @@ def delete_video(video_id: str) -> dict:
 def reset_videos() -> dict:
     """Remove all loaded videos, their ChromaDB chunks, and their cache entries."""
     video_metadata_store.clear()
-    col = get_collection()
-    all_ids = col.get(include=[])["ids"]
-    if all_ids:
-        col.delete(ids=all_ids)
+    reset_collection()
+    reset_yt_service()
     for vid in cache_service.list_ids():
         cache_service.delete(vid)
     return {"status": "ok"}

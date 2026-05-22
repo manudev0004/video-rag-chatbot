@@ -84,18 +84,24 @@ def chunk_transcript(text: str, metadata: dict) -> list[dict]:
     """Split a transcript into overlapping chunks with metadata."""
     texts = _splitter.split_text(text)
     total = len(texts)
+
+    base_meta: dict = {
+        "video_id": metadata["video_id"],
+        "title": metadata["title"],
+        "creator": metadata["creator"],
+        "engagement_rate": metadata["engagement_rate"],
+    }
+    # chromadb doesn't accept None - only add stats that are actually known
+    for key in ("views", "likes", "comments", "subscriber_count"):
+        val = metadata.get(key)
+        if val is not None:
+            base_meta[key] = int(val)
+
     return [
         {
             "id": str(uuid.uuid4()),
             "text": chunk,
-            "metadata": {
-                "video_id": metadata["video_id"],
-                "title": metadata["title"],
-                "creator": metadata["creator"],
-                "engagement_rate": metadata["engagement_rate"],
-                "chunk_index": i,
-                "total_chunks": total,
-            },
+            "metadata": {**base_meta, "chunk_index": i, "total_chunks": total},
         }
         for i, chunk in enumerate(texts)
     ]

@@ -36,10 +36,15 @@ def retrieve_context(video_id: str, query_embedding: list[float], k: int = 4) ->
         logger.warning("No chunks found for video_id=%s", video_id)
         return "", []
 
-    # Prepend video-level metadata so the LLM sees title and engagement rate
+    # Prepend video-level metadata so the LLM sees title, stats, and engagement rate
     video_meta = matched_chunks[0]["metadata"]
+    def _stat(key: str) -> str:
+        v = video_meta.get(key)
+        return str(int(v)) if v is not None else "N/A"
     header = (
         f"Video: {video_meta['title']} by {video_meta['creator']}\n"
+        f"Views: {_stat('views')} | Likes: {_stat('likes')} | Comments: {_stat('comments')}\n"
+        f"Subscribers / Followers: {_stat('subscriber_count')}\n"
         f"Engagement Rate: {video_meta['engagement_rate']}\n\n"
     )
     context = header + "\n\n".join(chunk["text"] for chunk in matched_chunks)
@@ -107,11 +112,14 @@ def generate_answer(state: VideoAnalysisState) -> dict:
         "You are a social media video analyst. Answer the user's question using only "
         "the context provided below.\n\n"
         "Context structure: each numbered section covers one video. It includes the "
-        "video title, creator, engagement rate (likes + comments as a share of views), "
-        "and relevant transcript excerpts. If a section starts with [no transcript], "
-        "that video had no captions — the content shown is built from its title, "
-        "description, and tags instead.\n\n"
+        "video title, creator, views, likes, comments, subscribers/followers, engagement "
+        "rate (likes + comments as a share of views), and relevant transcript excerpts. "
+        "If a section starts with [no transcript], that video had no captions — the "
+        "content shown is built from its title, description, and tags instead.\n\n"
         "Rules:\n"
+        "- 'Subscribers', 'followers', and 'fans' all mean the same thing. The context "
+        "labels this field 'Subscribers / Followers'. Answer with whichever term the "
+        "user used.\n"
         "- Use only information from the context. Do not use outside knowledge about "
         "these videos, creators, or topics.\n"
         "- If a video is marked [no transcript], say so when discussing its content. "

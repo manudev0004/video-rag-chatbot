@@ -98,7 +98,13 @@ export default function VideoCard({ label, data, loading, indexing, failed, onDe
             <p className="mt-1 truncate text-xs text-zinc-500">
               {data.creator}
               <span className="mx-1 text-zinc-300">·</span>
-              {data.subscriber_count !== null ? `${formatCount(data.subscriber_count)} subscribers` : "subscribers N/A"}
+              {(() => {
+                const isYt = data.source_url.includes("youtube.com") || data.source_url.includes("youtu.be");
+                const label = isYt ? "subscribers" : "followers";
+                return data.subscriber_count !== null
+                  ? `${formatCount(data.subscriber_count)} ${label}`
+                  : `${label} N/A`;
+              })()}
             </p>
           </div>
 

@@ -63,10 +63,10 @@ def _normalize_url(url: str) -> str:
     return url
 
 
-def _transcribe_and_embed_video(video_id: str, url: str) -> None:
+def _transcribe_and_embed_video(video_id: str, url: str, info: dict | None = None) -> None:
     """Fetch the transcript then embed. Runs in the background after metadata is returned."""
     try:
-        transcript = get_transcript(url)
+        transcript = get_transcript(url, info)
     except Exception as exc:
         logger.error("Transcript fetch failed for video_id=%s: %s", video_id, exc)
         cache_service.mark_failed(video_id)
@@ -94,6 +94,16 @@ def _embed_video(video_id: str) -> None:
     except Exception as exc:
         logger.error("Background embed failed for video_id=%s: %s", video_id, exc)
         cache_service.mark_failed(video_id)
+
+
+def _safe_error(exc: Exception) -> str:
+    """Return a short user-facing error string that doesn't include internal paths or headers."""
+    msg = str(exc)
+    # yt-dlp errors can be very verbose; truncate at the first newline and cap length
+    first_line = msg.split("\n")[0][:200]
+    # strip any /tmp paths that would reveal internal file layout
+    import re as _re
+    return _re.sub(r"/tmp/\S+", "[internal]", first_line)
 
 
 def _process_one_url(
@@ -130,31 +140,30 @@ def _process_one_url(
             try:
                 metadata = get_video_metadata(url)
             except (ValueError, RuntimeError, OSError) as exc:
-                return raw_url, None, None, str(exc)
+                logger.error("YouTube metadata failed for %s: %s", url, exc)
+                return raw_url, None, None, _safe_error(exc)
             if metadata.get("video_id") and metadata["video_id"] != video_id:
                 video_id = metadata["video_id"]
             metadata["source_url"] = url
             cache_service.save_metadata_only(video_id, metadata)
             bg.add_task(_transcribe_and_embed_video, video_id, url)
         else:
-            # for instagram/facebook yt-dlp handles both, reuse the same extract_info call
+            # fetch info once, return metadata immediately, transcript runs in background
             try:
                 info = fetch_ydlp_info(url)
             except RuntimeError as exc:
-                return raw_url, None, None, str(exc)
+                logger.error("yt-dlp extract_info failed for %s: %s", url, exc)
+                return raw_url, None, None, _safe_error(exc)
             try:
-                with ThreadPoolExecutor(max_workers=2) as pool:
-                    transcript_fut = pool.submit(get_transcript, url, info)
-                    metadata_fut = pool.submit(get_video_metadata, url, info)
-                    transcript = transcript_fut.result()
-                    metadata = metadata_fut.result()
+                metadata = get_video_metadata(url, info)
             except (ValueError, RuntimeError, OSError) as exc:
-                return raw_url, None, None, str(exc)
+                logger.error("Metadata failed for %s: %s", url, exc)
+                return raw_url, None, None, _safe_error(exc)
             if metadata.get("video_id") and metadata["video_id"] != video_id:
                 video_id = metadata["video_id"]
             metadata["source_url"] = url
-            cache_service.save(video_id, metadata, transcript)
-            bg.add_task(_embed_video, video_id)
+            cache_service.save_metadata_only(video_id, metadata)
+            bg.add_task(_transcribe_and_embed_video, video_id, url, info)
 
     return raw_url, video_id, metadata, None
 
@@ -171,7 +180,7 @@ def _process_one_url_safe(
         return _process_one_url(raw_url, bg)
     except Exception as exc:
         logger.error("Ingest failed for %s after retry: %s", raw_url, exc)
-        return raw_url, None, None, str(exc)
+        return raw_url, None, None, _safe_error(exc)
 
 
 @app.post("/ingest", response_model=IngestResponse)

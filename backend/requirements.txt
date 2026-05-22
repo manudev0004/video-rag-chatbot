@@ -11,6 +11,7 @@ langgraph
 prometheus-client
 psutil
 python-dotenv
+requests
 sse-starlette
 uvicorn
 youtube-transcript-api

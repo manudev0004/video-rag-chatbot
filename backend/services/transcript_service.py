@@ -122,6 +122,220 @@ def fetch_ydlp_info(url: str) -> dict:
             raise RuntimeError(f"yt-dlp failed to extract info for {url}: {exc}")
 
 
+_IG_APP_ID = "936619743392459"
+_IG_UA = (
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+    "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
+)
+_ig_media_cache: dict[str, dict] = {}
+
+
+def _ig_oembed_author(url: str) -> str | None:
+    """Get the author username via Instagram's public oEmbed endpoint."""
+    import urllib.parse as _urlparse
+    import requests as _req
+
+    encoded = _urlparse.quote(url, safe="")
+    try:
+        resp = _req.get(
+            f"https://www.instagram.com/api/v1/oembed/?url={encoded}",
+            headers={"User-Agent": _IG_UA},
+            timeout=15,
+        )
+        logger.info("Instagram oEmbed status=%s for %s", resp.status_code, url)
+        if resp.status_code == 200:
+            return (resp.json() or {}).get("author_name")
+    except (_req.RequestException, ValueError) as exc:
+        logger.info("Instagram oEmbed failed for %s: %s", url, exc)
+    return None
+
+
+def _ig_profile_followers(username: str) -> int | None:
+    """Get follower count by username - tries the profile API, falls back to the profile page."""
+    import requests as _req
+
+    try:
+        resp = _req.get(
+            f"https://www.instagram.com/api/v1/users/web_profile_info/?username={username}",
+            headers={
+                "User-Agent": _IG_UA,
+                "X-IG-App-ID": _IG_APP_ID,
+                "Accept": "*/*",
+            },
+            timeout=15,
+        )
+        logger.info("Instagram profile API status=%s for %s", resp.status_code, username)
+        if resp.status_code == 200:
+            count = (
+                (resp.json() or {})
+                .get("data", {})
+                .get("user", {})
+                .get("edge_followed_by", {})
+                .get("count")
+            )
+            if count is not None:
+                return int(count)
+    except (_req.RequestException, ValueError) as exc:
+        logger.info("Instagram profile API failed for %s: %s", username, exc)
+
+    try:
+        resp = _req.get(
+            f"https://www.instagram.com/{username}/",
+            headers={"User-Agent": _IG_UA, "Accept-Language": "en-US,en;q=0.9"},
+            timeout=15,
+        )
+        logger.info("Instagram profile page status=%s for %s", resp.status_code, username)
+        if resp.status_code != 200:
+            return None
+        desc_m = re.search(
+            r'<meta property="og:description" content="([^"]+)"', resp.text
+        )
+        if not desc_m:
+            return None
+        # e.g. "3M Followers, 166 Following, 422 Posts - See Instagram..."
+        num_m = re.search(r"([\d.,]+)\s*([KMBkmb])?\s*Followers", desc_m.group(1))
+        if not num_m:
+            return None
+        raw = num_m.group(1).replace(",", "")
+        try:
+            value = float(raw)
+        except ValueError:
+            return None
+        suffix = (num_m.group(2) or "").lower()
+        multiplier = {"k": 1_000, "m": 1_000_000, "b": 1_000_000_000}.get(suffix, 1)
+        count = int(value * multiplier)
+        logger.info("Instagram followers (og:description) for %s: %s", username, count)
+        return count
+    except (_req.RequestException, ValueError) as exc:
+        logger.info("Instagram profile page failed for %s: %s", username, exc)
+    return None
+
+
+def _fetch_instagram_media(url: str) -> dict:
+    """Get views, follower count, and username for an Instagram reel.
+
+    Uses the public embed page. For gated reels, falls back to oEmbed
+    for the username then the profile API for the follower count.
+    """
+    import requests as _req
+
+    if url in _ig_media_cache:
+        return _ig_media_cache[url]
+
+    result: dict = {"views": None, "follower_count": None, "username": None}
+    shortcode_m = re.search(r"/(?:p|reel|reels|tv)/([^/?#]+)", url)
+    if not shortcode_m:
+        _ig_media_cache[url] = result
+        return result
+    shortcode = shortcode_m.group(1)
+
+    embed_url = f"https://www.instagram.com/reel/{shortcode}/embed/captioned/"
+    try:
+        resp = _req.get(
+            embed_url,
+            headers={"User-Agent": _IG_UA, "Accept-Language": "en-US,en;q=0.9"},
+            timeout=15,
+        )
+        logger.info("Instagram embed status=%s for %s", resp.status_code, shortcode)
+        if resp.status_code == 200:
+            html = resp.text
+            views_m = (
+                re.search(r'\\"video_view_count\\":(\d+)', html)
+                or re.search(r'\\"play_count\\":(\d+)', html)
+            )
+            if views_m:
+                result["views"] = int(views_m.group(1))
+            followers_m = re.search(r'\\"edge_followed_by\\":\{\\"count\\":(\d+)\}', html)
+            if followers_m:
+                result["follower_count"] = int(followers_m.group(1))
+            user_m = re.search(r'\\"username\\":\\"([^\\"]+)\\"', html)
+            if user_m:
+                result["username"] = user_m.group(1)
+    except _req.RequestException as exc:
+        logger.warning("Instagram embed fetch failed for %s: %s", shortcode, exc)
+
+    if not result["username"]:
+        result["username"] = _ig_oembed_author(url)
+    if result["username"] and result["follower_count"] is None:
+        result["follower_count"] = _ig_profile_followers(result["username"])
+
+    logger.info(
+        "Instagram media data for %s: views=%s followers=%s username=%s",
+        shortcode, result["views"], result["follower_count"], result["username"],
+    )
+    _ig_media_cache[url] = result
+    return result
+
+
+def fetch_facebook_follower_count(uploader_id: str | int | None) -> int | None:
+    """Read follower count from a Facebook Page's meta description.
+
+    The page description looks like "PageName. 24,151 likes · 4,525 talking about
+    this" in English or "Name. 1,40,654 likes ." in Indian locale (lakh format).
+    """
+    if not uploader_id:
+        return None
+    uid = str(uploader_id)
+    if not uid.isdigit():
+        return None
+    import html as _html
+    import requests as _req
+
+    try:
+        resp = _req.get(
+            f"https://www.facebook.com/{uid}/",
+            headers={"User-Agent": _IG_UA, "Accept-Language": "en-US,en;q=0.9"},
+            timeout=15,
+            allow_redirects=True,
+        )
+        logger.info("Facebook page status=%s for id=%s", resp.status_code, uid)
+        if resp.status_code != 200:
+            return None
+        desc_m = re.search(r'<meta name="description"[^>]+content="([^"]+)"', resp.text)
+        if not desc_m:
+            logger.info("No description meta tag on Facebook page %s", uid)
+            return None
+        desc = _html.unescape(desc_m.group(1))
+        # skip the page name by splitting on ". ", then take the first number
+        parts = desc.split(". ", 1)
+        tail = parts[1] if len(parts) == 2 else desc
+        num_m = re.search(r"([\d][\d,.\s]*)", tail)
+        if not num_m:
+            return None
+        raw = re.sub(r"[,.\s]", "", num_m.group(1))
+        if not raw.isdigit():
+            return None
+        count = int(raw)
+        logger.info("Facebook follower count for id=%s: %s", uid, count)
+        return count
+    except (_req.RequestException, ValueError) as exc:
+        logger.warning("Facebook page lookup failed for %s: %s", uid, exc)
+    return None
+
+
+def fetch_instagram_follower_count(
+    url: str | None = None,
+    uploader_id: str | None = None,
+    username: str | None = None,
+) -> int | None:
+    """Get Instagram follower count for a reel URL."""
+    if url:
+        cached = _fetch_instagram_media(url)
+        if cached.get("follower_count") is not None:
+            return int(cached["follower_count"])
+        if cached.get("username") and not username:
+            username = cached["username"]
+    if username:
+        return _ig_profile_followers(username)
+    return None
+
+
+def scrape_instagram_views(url: str) -> int | None:
+    """Get Instagram reel view count from the embed page cache."""
+    cached = _fetch_instagram_media(url)
+    return int(cached["views"]) if cached.get("views") is not None else None
+
+
 def _parse_vtt(path: str) -> str:
     """Parse a WebVTT file and return plain text with duplicate lines removed."""
     lines = []

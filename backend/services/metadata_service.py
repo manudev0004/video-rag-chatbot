@@ -33,18 +33,24 @@ def reset_yt_service() -> None:
 
 def _metadata_via_ytdlp(url: str, info: dict | None = None) -> dict:
     """Extract video metadata for non-YouTube URLs using yt-dlp."""
-    from .transcript_service import fetch_ydlp_info
+    from .transcript_service import (
+        fetch_ydlp_info,
+        fetch_instagram_follower_count,
+        scrape_instagram_views,
+        fetch_facebook_follower_count,
+    )
 
     if info is None:
         info = fetch_ydlp_info(url)
 
     logger.info(
         "yt-dlp raw stats for %s: view_count=%s plays=%s play_count=%s like_count=%s "
-        "comment_count=%s channel_follower_count=%s follower_count=%s",
+        "comment_count=%s channel_follower_count=%s follower_count=%s uploader=%s uploader_url=%s",
         url,
         info.get("view_count"), info.get("plays"), info.get("play_count"),
         info.get("like_count"), info.get("comment_count"),
         info.get("channel_follower_count"), info.get("follower_count"),
+        info.get("uploader"), info.get("uploader_url"),
     )
 
     # yt-dlp uses different field names across platforms/versions
@@ -61,6 +67,9 @@ def _metadata_via_ytdlp(url: str, info: dict | None = None) -> dict:
     views = _first_int("view_count", "plays", "play_count")
     likes = _first_int("like_count")
     comments = _first_int("comment_count")
+
+    if views is None and "instagram.com" in url:
+        views = scrape_instagram_views(url)
 
     # Facebook doesn't expose likes via the API; parse reactions count from the title
     # e.g. "119K views · 464 reactions | Why was Queen Maeve..."
@@ -89,6 +98,21 @@ def _metadata_via_ytdlp(url: str, info: dict | None = None) -> dict:
     tags = info.get("tags") or []
     hashtags = [f"#{t}" for t in tags[:20]]
 
+    subscriber_count = _first_int("channel_follower_count", "follower_count", "uploader_follower_count")
+    if subscriber_count is None and "instagram.com" in url:
+        username = None
+        uploader_url = info.get("uploader_url") or info.get("channel_url") or ""
+        m = re.search(r"instagram\.com/([^/?#]+)/?", uploader_url)
+        if m and m.group(1) not in ("p", "reel", "reels", "tv", "stories"):
+            username = m.group(1)
+        subscriber_count = fetch_instagram_follower_count(
+            url=url,
+            uploader_id=info.get("uploader_id"),
+            username=username,
+        )
+    if subscriber_count is None and "facebook.com" in url:
+        subscriber_count = fetch_facebook_follower_count(info.get("uploader_id"))
+
     return {
         "video_id": info.get("id", ""),
         "title": info.get("title", ""),
@@ -101,7 +125,7 @@ def _metadata_via_ytdlp(url: str, info: dict | None = None) -> dict:
         "hashtags": hashtags,
         "thumbnail_url": info.get("thumbnail", ""),
         "engagement_rate": engagement_rate,
-        "subscriber_count": _first_int("channel_follower_count", "follower_count", "uploader_follower_count"),
+        "subscriber_count": subscriber_count,
     }
 
 

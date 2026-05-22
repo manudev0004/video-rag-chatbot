@@ -75,18 +75,25 @@ _QUIET_OPTS: dict = {
     "quiet": True,
     "no_warnings": True,
     "extractor_args": {"youtube": {"player_client": ["tv_embedded", "ios"]}},
+    "socket_timeout": 30,
+    "http_chunk_size": 1048576,  # 1MB chunks instead of loading full response
 }
 if _yt_proxy:
     _QUIET_OPTS["proxy"] = _yt_proxy
 
-_instagram_cookies = os.getenv("INSTAGRAM_COOKIES")
 _cookie_file: str | None = None
 
-if _instagram_cookies:
+_cookie_parts = [
+    c for c in [
+        os.getenv("INSTAGRAM_COOKIES"),
+        os.getenv("YOUTUBE_COOKIES"),
+    ] if c
+]
+if _cookie_parts:
     with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as _f:
-        _f.write(_instagram_cookies)
+        _f.write("\n".join(_cookie_parts))
         _cookie_file = _f.name
-    logger.info("Instagram cookies loaded from env")
+    logger.info("Cookies loaded from env (%d source(s))", len(_cookie_parts))
 
 
 def extract_video_id(url: str) -> str:
@@ -474,6 +481,45 @@ def _fetch_via_assemblyai(url: str) -> str:
     return text
 
 
+def _youtube_audio_url(url: str) -> str:
+    """Get a direct YouTube audio stream URL via pytubefix."""
+    from pytubefix import YouTube
+
+    yt = YouTube(url)
+    stream = yt.streams.filter(only_audio=True).order_by("abr").desc().first()
+    if not stream or not stream.url:
+        raise RuntimeError(f"No audio stream available for {url}")
+    return stream.url
+
+
+def _resolve_youtube_audio(url: str, video_id: str) -> str:
+    """Resolve a direct YouTube audio CDN URL for AssemblyAI.
+
+    AssemblyAI can't fetch youtube.com watch pages (returns HTML), so we
+    extract the audio CDN URL first. Tries yt-dlp (tv_embedded/ios clients
+    bypass most bot detection), then pytubefix as a backup.
+    """
+    errors: list[str] = []
+    try:
+        info = fetch_ydlp_info(url)
+        media_url = _get_media_url(info)
+        if media_url:
+            logger.info("YouTube audio URL resolved via yt-dlp for %s", video_id)
+            return media_url
+        errors.append("yt-dlp: no playable format in formats list")
+    except Exception as exc:
+        errors.append(f"yt-dlp: {exc}")
+
+    try:
+        audio_url = _youtube_audio_url(url)
+        logger.info("YouTube audio URL resolved via pytubefix for %s", video_id)
+        return audio_url
+    except Exception as exc:
+        errors.append(f"pytubefix: {exc}")
+
+    raise RuntimeError(f"YouTube audio extraction failed: {' | '.join(errors)}")
+
+
 def _fetch_any_transcript(api: YouTubeTranscriptApi, video_id: str) -> str:
     """Try to fetch any available transcript when the preferred language isn't found."""
     tlist = api.list(video_id)
@@ -526,13 +572,40 @@ def get_transcript(url: str, info: dict | None = None) -> str:
         except (TranscriptsDisabled, CouldNotRetrieveTranscript) as exc:
             logger.warning("youtube-transcript-api failed (%s), falling back to AssemblyAI", exc)
 
-        # captions failed or blocked, hand off to assemblyai
-        return _fetch_via_assemblyai(url)
+        # transcript API blocked or subtitles disabled — try to extract audio for AssemblyAI
+        try:
+            audio_url = _resolve_youtube_audio(url, video_id)
+            return _fetch_via_assemblyai(audio_url)
+        except Exception as exc:
+            logger.warning(
+                "YouTube audio path failed for %s (%s), falling back to metadata",
+                video_id, exc,
+            )
+
+        # last resort: build a [no transcript] placeholder from yt-dlp metadata so the video
+        # still gets indexed and the LLM is told its content is limited to title/description
+        try:
+            info = fetch_ydlp_info(url)
+            return _fallback_from_metadata(info, url)
+        except Exception as exc:
+            logger.warning("yt-dlp info failed for %s (%s), using minimal placeholder", video_id, exc)
+
+        return (
+            f"[no transcript] YouTube video {video_id}. No captions were available and "
+            "the audio could not be retrieved from this environment."
+        )
 
     logger.info("Fetching transcript via yt-dlp: %s", url)
     try:
         return _fetch_via_ytdlp(url, info)
-    except RuntimeError:
-        raise
     except Exception as exc:
-        raise RuntimeError(f"No transcript available for {url}: {exc}")
+        logger.warning("yt-dlp path failed for %s (%s), falling back to metadata", url, exc)
+
+    try:
+        if info is None:
+            info = fetch_ydlp_info(url)
+        return _fallback_from_metadata(info, url)
+    except Exception as exc:
+        logger.warning("Metadata fallback failed for %s (%s), using minimal placeholder", url, exc)
+
+    return f"[no transcript] Video at {url}. No captions and audio could not be retrieved."

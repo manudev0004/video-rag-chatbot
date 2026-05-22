@@ -1,7 +1,9 @@
+import gc
 import json
 import logging
 import os
 import re
+import threading
 from concurrent.futures import ThreadPoolExecutor
 
 from dotenv import load_dotenv
@@ -45,6 +47,9 @@ chat_histories: dict[str, list] = {}
 _https_re = re.compile(r"^https?://")
 _bad_scheme_re = re.compile(r"^h[a-z]*:?//")
 
+# only one video transcribes+embeds at a time to keep memory under control
+_ingest_sem = threading.Semaphore(1)
+
 ingest_counter = Counter("ingest_requests_total", "Total ingest requests")
 chat_counter = Counter("chat_requests_total", "Total chat requests")
 chat_latency = Histogram("chat_latency_seconds", "Chat response latency in seconds")
@@ -65,14 +70,17 @@ def _normalize_url(url: str) -> str:
 
 def _transcribe_and_embed_video(video_id: str, url: str, info: dict | None = None) -> None:
     """Fetch the transcript then embed. Runs in the background after metadata is returned."""
-    try:
-        transcript = get_transcript(url, info)
-    except Exception as exc:
-        logger.error("Transcript fetch failed for video_id=%s: %s", video_id, exc)
-        cache_service.mark_failed(video_id)
-        return
-    cache_service.save_transcript(video_id, transcript)
-    _embed_video(video_id)
+    with _ingest_sem:
+        try:
+            transcript = get_transcript(url, info)
+        except Exception as exc:
+            logger.error("Transcript fetch failed for video_id=%s: %s", video_id, exc)
+            cache_service.mark_failed(video_id)
+            return
+        cache_service.save_transcript(video_id, transcript)
+        del transcript
+        gc.collect()
+        _embed_video(video_id)
 
 
 def _embed_video(video_id: str) -> None:
@@ -87,6 +95,8 @@ def _embed_video(video_id: str) -> None:
         cache_service.mark_failed(video_id)
         return
     chunks = chunk_transcript(transcript, entry["metadata"])
+    del transcript, entry
+    gc.collect()
     try:
         store_chunks(chunks)
         cache_service.mark_embedded(video_id)
@@ -190,7 +200,7 @@ def ingest(request: IngestRequest, bg: BackgroundTasks) -> IngestResponse:
     ingested: dict[str, VideoMetadata] = {}
     errors: dict[str, str] = {}
 
-    with ThreadPoolExecutor(max_workers=len(request.urls) or 1) as pool:
+    with ThreadPoolExecutor(max_workers=min(len(request.urls), 2) or 1) as pool:
         futures = [pool.submit(_process_one_url_safe, url, bg) for url in request.urls]
         for fut in futures:
             orig_url, video_id, metadata, error = fut.result()
@@ -284,7 +294,9 @@ async def chat_stream(request: ChatRequest) -> EventSourceResponse:
         "video title, creator, engagement rate (likes + comments as a share of views), "
         "and relevant transcript excerpts. If a section starts with [no transcript], "
         "that video had no captions — the content shown is built from its title, "
-        "description, and tags instead.\n\n"
+        "description, and tags instead. "
+        "In transcripts, >> marks a speaker change. Use this to understand conversation "
+        "turns but do not include >> in your response.\n\n"
         "Rules:\n"
         "- Use only information from the context. Do not use outside knowledge about "
         "these videos, creators, or topics.\n"
@@ -296,7 +308,9 @@ async def chat_stream(request: ChatRequest) -> EventSourceResponse:
         "quotes, stats, or concrete examples.\n"
         "- If the context does not contain enough information to answer, say so "
         "clearly. Do not guess.\n"
-        "- Be direct and concise. No filler, no restating the question.\n\n"
+        "- Be direct and concise. No filler, no restating the question.\n"
+        "- Format your response using markdown: use headers for sections, bold for "
+        "key points, and bullet points where it helps readability.\n\n"
         + context_blocks
     )
     messages = [SystemMessage(content=system_content)]
